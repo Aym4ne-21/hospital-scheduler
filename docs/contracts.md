@@ -233,3 +233,6 @@ From the repository root on Windows:
 ```
 
 A successful build verifies the compiled core and its current tests. It does not establish correctness of unimplemented algorithms or end-to-end hospital scheduling.
+
+PostgreSQL migrations, database setup and the four-PC verification checklist are
+documented in the [persistence module](../scheduler-persistence/README.md).

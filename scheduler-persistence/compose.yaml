@@ -1,0 +1,32 @@
+name: hospital-scheduler-local
+
+services:
+  postgres:
+    image: postgres:18.7-bookworm
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-project15_dev}
+      POSTGRES_USER: ${POSTGRES_USER:-project15}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env}
+      # libpq variables used by the migration and seed scripts inside the container.
+      PGDATABASE: ${POSTGRES_DB:-project15_dev}
+      PGUSER: ${POSTGRES_USER:-project15}
+      PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env}
+      PGHOST: 127.0.0.1
+      PGPORT: "5432"
+    ports:
+      - "127.0.0.1:${PROJECT15_DB_PORT:-55432}:5432"
+    volumes:
+      # PostgreSQL 18 images keep versioned PGDATA underneath this directory.
+      - postgres-data:/var/lib/postgresql
+      - ./scripts:/workspace/scripts:ro
+      - ./db:/workspace/db:ro
+      - ./src/main/resources/db/migration:/workspace/src/main/resources/db/migration:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 2s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  postgres-data:
