@@ -1,200 +1,146 @@
-# Schéma PostgreSQL et contrat de persistance
+# PostgreSQL schema
 
-Ces diagrammes décrivent les migrations intégrées dans `scheduler-persistence`.
-Le mapping ci-dessous a été confronté aux classes réelles de `scheduler-core`.
-Le schéma applicatif est `hospital` ; il contient 27 tables. Le journal de
-migration est séparé : `public.database_schema_migration`.
-
-## Ressources hospitalières
-
-```mermaid
-erDiagram
-    hospital ||--o{ department : contient
-    department ||--o{ specialty : regroupe
-    department ||--o{ doctor : rattache
-    doctor ||--o{ doctor_specialty : possede
-    specialty ||--o{ doctor_specialty : qualifie
-    department ||--o{ room : rattache
-    room_type ||--o{ room : classe
-    room ||--o{ room_equipment : dispose
-    equipment ||--o{ room_equipment : equipe
-    doctor ||--o{ doctor_availability : travaille
-    doctor ||--o{ doctor_absence : absent
-    doctor ||--o{ doctor_break : pause
-```
-
-`doctor_specialty` et `room_equipment` sont les associations N–N. La seconde
-porte une quantité positive. Une spécialité appartient à un département ; le
-contrôle de cohérence entre hôpitaux reste applicatif.
-
-## Patients et demandes
+The Day 1 schema is in `src/main/resources/db/migration/V001__hospital_and_availability.sql`.
+It creates 19 tables in the `hospital` schema for the hospital, departments,
+specialties, doctors, rooms, equipment, patients, requests and their availability.
+The migration also installs `btree_gist`, uses foreign keys, and checks positive
+finite durations and half-open time ranges.
 
 ```mermaid
 erDiagram
-    patient ||--o{ patient_availability : disponible
-    patient ||--o{ patient_time_preference : prefere
-    patient ||--o{ appointment_request : demande
-    specialty ||--o{ appointment_request : requise
-    room_type o|--o{ appointment_request : type_requis
-    appointment_request ||--o{ request_availability : autorise
-    patient_availability ||--o{ request_availability : fenetre
-    appointment_request ||--o{ request_equipment : requiert
-    equipment ||--o{ request_equipment : besoin
+    hospital ||--o{ department : contains
+    department ||--o{ specialty : groups
+    department ||--o{ doctor : assigns
+    doctor ||--o{ doctor_specialty : has
+    specialty ||--o{ doctor_specialty : qualifies
+    department ||--o{ room : assigns
+    room ||--o{ room_equipment : has
+    equipment ||--o{ room_equipment : equips
+    doctor ||--o{ doctor_availability : works
+    doctor ||--o{ doctor_absence : misses
+    doctor ||--o{ doctor_break : pauses
+    patient ||--o{ patient_availability : offers
+    patient ||--o{ appointment_request : requests
+    specialty ||--o{ appointment_request : requires
+    appointment_request ||--o{ request_availability : selects
+    patient_availability ||--o{ request_availability : window
+    appointment_request ||--o{ request_equipment : requires
+    equipment ||--o{ request_equipment : needs
 ```
 
-Les FK composées de `request_availability` imposent que la fenêtre et la demande
-appartiennent au même patient. Une préférence est souple ; une disponibilité est
-obligatoire. `duration_minutes` est compris entre 1 et 1440 ; l’alignement sur une
-grille de 15 minutes relève du futur contrat d’application.
+`doctor_specialty`, `room_equipment`, `request_availability` and
+`request_equipment` are join tables. Composite foreign keys ensure a request
+uses its own patient's availability window. Appointment duration is constrained
+to 1–1440 minutes. The team's proposed 15-minute grid remains an application
+contract to confirm.
 
-## Plannings et expériences
+## Mapping to the current core
 
-```mermaid
-erDiagram
-    hospital ||--o{ schedule_week : organise
-    schedule_week ||--o{ schedule : versions
-    algorithm ||--o{ schedule : calcule
-    schedule ||--o{ appointment : affecte
-    appointment_request ||--o{ appointment : realise
-    doctor o|--o{ appointment : medecin
-    room o|--o{ appointment : salle
-    appointment o|--o{ appointment : source_verrouillee
-    schedule_week o|--o{ benchmark_instance : semaine_reference
-    benchmark_instance ||--o{ experiment : instance
-    experiment ||--o{ experiment_run : execute
-    algorithm ||--o{ experiment_run : methode
-    experiment_run ||--o{ fitness_point : convergence
-```
-
-Une affectation candidate peut être incomplète ; une confirmation exige médecin,
-salle et bornes. La clé `(schedule_id, request_id)` interdit de doubler une demande
-dans une même version. Les exclusions sur les confirmés portent sur toutes les
-versions. `demo_dataset`, la 27e table, marque les fixtures ; les principales
-entités peuvent lui être rattachées par `demo_dataset_key`, sans que des données
-utilisateur soient obligées d’appartenir à la démonstration.
-
-Les conventions ouvertes et les limites de l’historique figurent dans
-[les décisions locales](decisions.md). La connexion et les conversions temporelles
-sont décrites dans [le guide d’installation](database-setup.md).
-
-## Relations et correspondance avec le core existant
-
-| Relation | Cardinalité retenue |
-|---|---|
-| Hôpital → départements ; département → spécialités/médecins/salles | 1 → N ; appartenance obligatoire |
-| Médecin ↔ spécialités | N ↔ N par `doctor_specialty` |
-| Salle → type de salle ; salle ↔ équipements | N → 1 ; N ↔ N avec quantité par `room_equipment` |
-| Médecin → disponibilités/absences/pauses | 1 → N intervalles datés |
-| Patient → fenêtres/préférences/demandes | 1 → N |
-| Demande ↔ fenêtres patient/équipements | N ↔ N par `request_availability` / `request_equipment` |
-| Hôpital → semaines → plannings → rendez-vous | 1 → N à chaque étape |
-| Demande → rendez-vous | 1 → N entre plannings, 0 ou 1 dans un planning |
-| Algorithme → plannings/exécutions | 1 → N |
-| Instance → expériences → exécutions → points de fitness | 1 → N à chaque étape |
-| Rendez-vous candidat → réservation source | N → 0 ou 1, FK `carried_from_appointment_id` |
-
-La FK composée de `request_availability` vérifie que la fenêtre appartient au
-patient de la demande. Les identifiants sont tous des `bigint GENERATED ALWAYS
-AS IDENTITY`, les codes métier des textes uniques. Les associations ne sont pas
-supprimées en cascade : les suppressions doivent être explicites.
-
-| Type réel dans `scheduler-core` | Tables SQL | Mapping et limite constatée |
+| Core type | Initial database representation | Open mapping detail |
 |---|---|---|
-| `Patient(long id, String name)` | `patient.id`, `display_name` | `bigint` correspond au `long` Java ; codes et e-mails restent des métadonnées SQL. |
-| `Doctor(long id, String name, String specialty, List<TimeSlot> workingHours, List<TimeSlot> unavailableSlots)` | `doctor`, `doctor_specialty`, `doctor_availability`, `doctor_absence`, `doctor_break` | Combiner pauses et absences pour les indisponibilités. Le core accepte une seule spécialité ; la démo contient deux médecins multi-spécialités. Aucune spécialité arbitraire ne doit être choisie. |
-| `Room(long id, String name, Set<String> equipment)` | `room`, `room_equipment`, `equipment` | Les codes stables sont des identités possibles pour les chaînes ; le type de salle et les quantités ne sont pas représentés dans le core. |
-| `TimeSlot(LocalDateTime start, LocalDateTime end)` | Colonnes `starts_at`, `ends_at` en `timestamptz` | Lire `OffsetDateTime`, convertir via le `ZoneId` de l’hôpital puis `toLocalDateTime()`. Les deux modèles utilisent `[début, fin)`. Résoudre explicitement les heures ambiguës/inexistantes à l’écriture. |
-| `AppointmentRequest` | `appointment_request`, `patient`, `specialty`, `request_availability`, `patient_availability`, `request_equipment` | Durée entière en minutes ; fenêtres propres à la demande via les associations patient. Urgence Java `int` sans ordre défini contre trois libellés SQL : convention à définir. Statut et type de salle ne sont pas dans le core. |
-| `Appointment(request, doctor, room, timeSlot)` | `appointment` | Les quatre arguments Java sont obligatoires ; les candidats SQL incomplets ne peuvent pas être reconstruits sans un contrat supplémentaire. Verrou, statut et provenance restent des métadonnées SQL. |
-| `Schedule(List<Appointment>)` | `schedule`, `schedule_week`, `appointment` | Unicité de l’ID de demande dans les deux modèles. ID de planning, semaine, publication et algorithme ne font pas partie du `Schedule` Java. |
-| `OptimizationProblem` | Ressources et demandes sélectionnées | Contient trois listes : médecins, salles, demandes. La sélection par hôpital/semaine et les réservations externes nécessitent une API de persistance explicite. |
-| `OptimizationParameters(long seed, int maxIterations)` | `random_seed`, `parameters` JSON | Graine signée 64 bits compatible ; `maxIterations` doit être conservé explicitement dans les paramètres. Le budget SQL en millisecondes n’est pas un nombre d’itérations. |
-| `FitnessBreakdown(int hardViolations, double softCost)` | `schedule.final_fitness`, `experiment_run.final_fitness`, `hard_violations`, `fitness_point.fitness` | Le core minimise la paire lexicographiquement. Le score scalaire synthétique SQL ne suffit pas pour stocker/reconstruire cette paire ; une migration supplémentaire est requise avant persistance de vrais résultats. |
-| `OptimizationResult`, `OptimizationProgress` | `schedule`, `experiment_run`, `fitness_point` | Le core a un historique de paires de fitness et un statut `String` sans vocabulaire standard. Les colonnes actuelles ne stockent pas encore toutes ces informations sans perte. |
+| `Patient` | `patient` | Java `long` maps to SQL `bigint`. |
+| `Doctor` | `doctor`, `doctor_specialty`, dated availability/absence/break rows | Core has one specialty string; SQL supports multiple specialties. |
+| `Room` | `room`, `room_equipment`, `equipment` | Type and quantity are preserved in the repository DTOs. |
+| `TimeSlot` | `timestamptz` endpoints, `[start,end)` range | Convert instants through the hospital zone to Java `LocalDateTime`. |
+| `AppointmentRequest` | `appointment_request`, patient windows and equipment links | Java urgency is an unstandardized integer; SQL uses named levels. |
 
-`Hospital`, `Department`, `RoomType`, les statuts persistés, les préférences,
-les expériences et les réservations verrouillées n’ont pas de types équivalents
-actuels dans le core. Les tables servent déjà aux tests SQL, mais aucune couche
-DAO métier n’est déclarée implémentée. Les écarts et décisions d’adaptation sont
-suivis dans [decisions.md](decisions.md), en référence au
-[contrat partagé réel](../../docs/contracts.md).
+## Day 2 task 1: schedules
 
-Le remplacement transactionnel transfère l’identité des réservations verrouillées
-au nouveau planning ; l’ancien planning archivé n’est pas un instantané complet.
-Si un historique immuable est requis, séparer la réservation réelle des
-associations entre chaque version de planning et ses affectations.
+`V002__schedules.sql` adds five tables, bringing the total to 24:
 
-## Garanties SQL et responsabilités applicatives
+| Table | Purpose |
+|---|---|
+| `algorithm` | Method name, stable code and version. |
+| `schedule_week` | Hospital and local Monday date; one row per hospital/week. |
+| `schedule` | Saved version with method, JSON parameters, seed, fitness and lifecycle status. |
+| `candidate_assignment` | One proposed assignment per request per schedule, with doctor, room, interval and lock flag. |
+| `confirmed_appointment` | Operational reservation referring to the exact saved assignment. |
 
-La base garantit les FK, codes uniques, associations sans doublon, durée de
-demande positive, intervalles finis avec fin strictement après début, et un seul
-rendez-vous par demande **par planning**, quel que soit son statut. Une ligne
-annulée occupe encore cette clé : la réutiliser ou la supprimer explicitement
-avant de recréer l’affectation. Une affectation candidate peut être entièrement
-non datée et non affectée, mais ne peut avoir qu’une seule borne renseignée.
-Une confirmation exige médecin, salle et deux bornes non nulles. `locked=true`
-exige `CONFIRMED`. Un seul planning peut être `PUBLISHED` par semaine/hôpital.
+A week can have several saved schedules. Candidate assignments use finite,
+positive, half-open `[start,end)` intervals and valid foreign keys, but overlapping
+resources are allowed. `locked` can also be stored on a candidate; preserving
+locks during optimization is an application responsibility.
 
-Deux exclusions GiST partielles, `confirmed_doctor_no_overlap` et
-`confirmed_room_no_overlap`, utilisent l’égalité de la ressource et `&&` sur
-`occupied_at`, avec `WHERE (status = 'CONFIRMED')`. **Le planning ne figure pas
-dans leurs clés** : les réservations réelles sont protégées globalement. Elles
-s’appliquent aux `INSERT` et aux `UPDATE` de statut, ressource ou bornes, y compris
-entre transactions concurrentes. Les candidats peuvent chevaucher des confirmés
-ou d’autres candidats. SQLSTATE attendu pour une exclusion : `23P01` ; vérifier
-aussi le nom de contrainte.
+Confirmed reservations repeat the assignment's request, doctor, room and instants
+for the resource exclusions added by V003. A composite foreign key
+requires those values to match the saved assignment and prevents changing it
+while reserved. A request can have only one active confirmed reservation.
+Deleting a reservation preserves its candidate assignment and schedule history.
 
-Le calcul de fitness doit contrôler spécialité, hôpital, type/équipement et
-quantités, durée, disponibilités patient/médecin, pauses, absences, semaine,
-chronologie, patients simultanés et respect des verrous. Il pénalise aussi les
-affectations manquantes et les conflits **internes au candidat**. Une copie
-candidate d’une réservation verrouillée référencée ne constitue pas une deuxième
-occupation réelle ; tenir compte des réservations externes qui ne seront pas
-libérées lors de la publication. Ne pas additionner tous les candidats comme
-s’ils étaient réservés simultanément. Les préférences sont souples, leur
-pondération appartient à l’objectif Java. Le schéma accepte volontairement les
-candidats infaisables pour que l’interface puisse afficher leurs violations.
+Statuses are `DRAFT`, `RUNNING`, `CANDIDATE`, `CONFIRMED` and `ARCHIVED`.
+Candidate and confirmed schedules require a finite nonnegative fitness; parameters
+must be a JSON object. Status transitions, completeness, request duration matching,
+availability, specialty, equipment and week boundaries need application validation.
+Confirmation must eventually update reservations and schedule status atomically.
 
-Avant confirmation, l’application refait ces contrôles dans une transaction avec
-les verrous appropriés. Modifier une absence n’annule pas automatiquement un
-rendez-vous ; une FK n’interdit pas de déplacer un rendez-vous marqué verrouillé.
-Ces règles métier, les transitions d’état, la validité d’un nom de fuseau et
-l’intégrité d’une courbe complète restent applicatives. Une exécution terminée
-exige ses résultats non nuls ; le dernier point égal au résultat final, les temps
-ordonnés et la cohérence des violations sont vérifiés sur le jeu de démonstration.
-Tous les scores doivent être finis et non négatifs ; un objectif Java maximisé
-ou négatif nécessiterait une migration d’adaptation.
+V003 adds global doctor/room overlap exclusions. Confirmation transactions
+remain subsequent work. Seed data and experiment
+tables remain later work.
+See [setup](database-setup.md), [team decisions](decisions.md), and the
+[core contract](../../docs/contracts.md).
 
-## Publication et remplacement atomiques
 
-`DRAFT` et `RUNNING` peuvent conserver une fitness `NULL`. `CANDIDATE` et
-`PUBLISHED` exigent un résultat final. La publication d’un planning et le statut
-des rendez-vous sont distincts : SQL n’impose pas que toutes ses lignes soient
-confirmées. L’application effectue l’ensemble des transitions dans **une même
-transaction**. Une réservation restée `CONFIRMED` continue d’occuper sa ressource,
-même si son planning est archivé.
+## Day 2 task 2: hospital repository
 
-Le scénario exécutable [replanning.sql](../db/verify/replanning.sql), terminé par
-`ROLLBACK`, démontre le remplacement suivant :
+`HospitalRepository` and its immutable `HospitalWeek` data contract live in core;
+`HospitalRepositoryJdbc` implements them in persistence with an injected
+`javax.sql.DataSource`. No JDBC types or PostgreSQL dependencies enter core.
+The repository preserves multiple specialties, equipment quantities, room types,
+request status/urgency, dated windows, absences, breaks and recurring preferences.
 
-1. Verrouiller la semaine (`FOR UPDATE`), les deux plannings et leurs rendez-vous.
-   Faire participer les éditions de disponibilités/absences au même protocole
-   de verrouillage ; sinon employer une stratégie sérialisable avec reprises.
-2. Calculer et valider l’alternative, en conservant toutes les réservations
-   verrouillées. Archiver l’ancien planning, puis annuler ses réservations
-   déverrouillées pour libérer leurs créneaux.
-3. Supprimer les copies candidates qui référencent les réservations verrouillées,
-   puis transférer les **lignes originales**, avec leurs mêmes identifiants,
-   au nouveau planning. Leur statut reste `CONFIRMED`, leurs ressources et heures
-   restent identiques ; aucune seconde réservation confirmée n’est créée.
-4. Appliquer la nouvelle affectation, confirmer les autres candidats, recalculer
-   le résultat, puis publier le nouveau planning. Valider la couverture et la
-   faisabilité avant `COMMIT`. En cas d’erreur, annuler toute la transaction.
+Weekly reads use the hospital's IANA zone to compute the two local Monday
+boundaries, then compare absolute instants in PostgreSQL. Intersecting windows
+retain their original endpoints, including windows crossing a week boundary.
+All SELECTs share a repeatable-read transaction and deterministic ordering;
+related collections are loaded in groups instead of one SELECT per doctor.
 
-Le test crée une absence fictive du médecin `demo15.doc.1`, lundi 16 novembre
-10:00–10:30. Seule `demo15.req.011`, 10:00–10:15, est affectée. Le médecin
-`demo15.doc.2`, de même spécialité et disponible, la reprend dans la même salle
-et aux mêmes heures. Les 150 réservations subsistent, les cinq verrous gardent
-leurs identifiants et un seul planning reste publié. Le `ROLLBACK` remet la base
-dans son état initial.
+The current optimizer model still needs a separately agreed mapping for urgency,
+multiple specialties, quantities and local date-times. The editing DTO avoids
+silently dropping those fields while that contract is finalized.
 
+
+## Day 2 task 3: confirmed resource exclusions
+
+`V003__confirmed_appointment_exclusions.sql` adds two GiST exclusion constraints
+to `confirmed_appointment`:
+
+| Constraint | Rejects |
+|---|---|
+| `confirmed_doctor_no_overlap` | Equal doctor IDs with overlapping `occupied_at` ranges. |
+| `confirmed_room_no_overlap` | Equal room IDs with overlapping `occupied_at` ranges. |
+
+The exclusion keys deliberately omit the schedule ID: operational reservations
+must not overlap across versions. Half-open `[start,end)` ranges allow adjacent
+appointments. Candidates retain their existing behavior and may overlap.
+The exclusions apply to INSERT and UPDATE, including concurrent transactions.
+PostgreSQL returns SQLSTATE `23P01` and the violated constraint name. A conflicting
+uncommitted reservation makes a competing insert wait; after its commit the
+competitor fails, or after its rollback the competitor can succeed.
+
+V003 validates existing reservations. If existing confirmed rows overlap, the
+migration fails atomically and keeps their data; resolve those conflicts before
+retrying. It never deletes or moves bookings automatically. Business validation,
+atomic replacement of a week's reservations, schedule status updates and stale
+version handling still belong in the future confirmation service/repository.
+
+
+## Day 2 task 3: schedule repository
+
+`ScheduleRepository` and `ScheduleSnapshot` live in core. The JDBC implementation
+in persistence uses the existing V002 tables without changing any migration.
+`saveCandidate` creates a new saved version, reuses or creates its hospital week
+and algorithm, then inserts all assignments with a prepared JDBC batch. Any
+failed statement or invalid reference rolls the entire operation back.
+
+Each saved version has a unique code; existing versions are never overwritten.
+A request occurs at most once in a version. Every assignment's request, doctor
+and room must belong to the version's hospital, but resource overlaps and other
+fitness violations remain representable. This method never writes operational
+reservations or sets a schedule to CONFIRMED.
+
+Loads use repeatable-read transactions. Week loads fetch assignments and metadata
+in two grouped queries; versions are ordered by creation timestamp/ID and their
+assignments by request ID. Algorithm metadata, canonical JSON parameters, seed,
+exact fitness, timestamps and lock flags survive reload. Assignment database IDs
+remain internal; the public contract identifies an assignment by its request
+within the saved version.

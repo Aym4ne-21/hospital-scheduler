@@ -236,3 +236,18 @@ A successful build verifies the compiled core and its current tests. It does not
 
 PostgreSQL migrations, database setup and the four-PC verification checklist are
 documented in the [persistence module](../scheduler-persistence/README.md).
+
+The core `com.hospitalscheduler.repository` package defines `HospitalRepository`
+and immutable `HospitalWeek` editing data. The persistence module supplies its
+JDBC implementation. The editing data preserves multiple specialties, equipment
+quantities and absolute timestamps; conversion into optimizer types still needs
+the team's mapping conventions. Usage and weekly save semantics are documented
+in the [repository guide](../scheduler-persistence/docs/database-setup.md#hospital-repository).
+
+
+`ScheduleRepository` persists immutable `ScheduleSnapshot` candidate versions.
+Its JDBC implementation inserts metadata and assignments atomically and loads
+versions by code or hospital/week. Snapshot assignments use existing request,
+doctor and room IDs, absolute instants and lock flags; they remain separate from
+optimizer `Schedule` objects until the application's mapping conventions are agreed.
+See [schedule repository usage](../scheduler-persistence/docs/database-setup.md#schedule-repository).

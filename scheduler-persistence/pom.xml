@@ -10,7 +10,7 @@
     </parent>
 
     <artifactId>scheduler-persistence</artifactId>
-    <description>PostgreSQL schema, fixtures and persistence integration tests.</description>
+    <description>PostgreSQL hospital and schedule schemas with migration integration tests.</description>
 
     <dependencies>
         <dependency>
@@ -30,19 +30,19 @@
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
-            <artifactId>testcontainers-junit-jupiter</artifactId>
+            <artifactId>testcontainers-postgresql</artifactId>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.testcontainers</groupId>
-            <artifactId>testcontainers-postgresql</artifactId>
+            <artifactId>testcontainers-junit-jupiter</artifactId>
             <scope>test</scope>
         </dependency>
     </dependencies>
 
     <profiles>
         <profile>
-            <id>database-it</id>
+            <id>persistence-it</id>
             <properties>
                 <postgres.image>postgres:18.7-bookworm</postgres.image>
             </properties>

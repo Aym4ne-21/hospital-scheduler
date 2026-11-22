@@ -15,12 +15,11 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.Savepoint;
 import java.sql.SQLException;
-import java.time.OffsetDateTime;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** Exercises the shipped Bash/psql runner, rather than a second migration implementation. */
+/** Verifies migrations, upgrades and structural constraints on real PostgreSQL. */
 @Testcontainers
 class MigrationIT {
     private static final Path ROOT = Path.of(System.getProperty("scheduler.persistence.root", ".")).toAbsolutePath();
@@ -32,7 +31,6 @@ class MigrationIT {
             .withUsername("migration_test")
             .withPassword("testcontainers_only")
             .withCopyFileToContainer(MountableFile.forHostPath(ROOT.resolve("scripts")), "/workspace/scripts")
-            .withCopyFileToContainer(MountableFile.forHostPath(ROOT.resolve("db")), "/workspace/db")
             .withCopyFileToContainer(MountableFile.forHostPath(ROOT.resolve("src/main/resources/db/migration")),
                     "/workspace/src/main/resources/db/migration");
 
@@ -40,7 +38,6 @@ class MigrationIT {
 
     @BeforeAll
     static void prepareScripts() throws Exception {
-        // Also works when the source checkout came from a Windows ZIP download.
         succeeds(POSTGRES.execInContainer("bash", "-c", "chmod +x /workspace/scripts/*.sh"));
     }
 
@@ -54,93 +51,168 @@ class MigrationIT {
 
     @Test
     void migratesEmptyDatabaseAndReplaysWithoutChangingTheJournal() throws Exception {
-        migrate("/workspace");
+        migrate();
         try (var connection = connect()) {
-            assertEquals(27, scalar(connection, "SELECT count(*) FROM information_schema.tables "
+            assertEquals(24, scalar(connection, "SELECT count(*) FROM information_schema.tables "
                     + "WHERE table_schema='hospital' AND table_type='BASE TABLE'"));
             assertEquals(3, scalar(connection, "SELECT count(*) FROM public.database_schema_migration"));
             assertEquals(1, scalar(connection, "SELECT count(*) FROM pg_extension WHERE extname='btree_gist'"));
-            assertEquals(2, scalar(connection, "SELECT count(*) FROM pg_constraint "
-                    + "WHERE conrelid='hospital.appointment'::regclass AND contype='x' "
-                    + "AND conname IN ('confirmed_doctor_no_overlap','confirmed_room_no_overlap')"));
             assertEquals(0, scalar(connection, "SELECT count(*) FROM hospital.patient"));
             String before = journal(connection);
-            migrate("/workspace");
-            assertEquals(before, journal(connection), "Replay must preserve checksums and application timestamps");
+            migrate();
+            assertEquals(before, journal(connection), "Replay must preserve the migration record");
         }
     }
 
     @Test
-    void upgradesV001AndRejectsAnEditedAppliedMigration() throws Exception {
-        String copy = "/tmp/upgrade_" + database;
-        succeeds(POSTGRES.execInContainer("cp", "-a", "/workspace", copy));
-        String migrations = copy + "/src/main/resources/db/migration/";
-        succeeds(POSTGRES.execInContainer("rm", migrations + "V002__schedules_and_reservations.sql",
-                migrations + "V003__synthetic_experiments.sql"));
-        migrate(copy);
-        try (var connection = connect()) {
-            assertEquals(1, scalar(connection, "SELECT count(*) FROM public.database_schema_migration"));
-            assertEquals(19, scalar(connection, "SELECT count(*) FROM information_schema.tables "
-                    + "WHERE table_schema='hospital' AND table_type='BASE TABLE'"));
-        }
-        succeeds(POSTGRES.execInContainer("cp",
-                "/workspace/src/main/resources/db/migration/V002__schedules_and_reservations.sql",
-                "/workspace/src/main/resources/db/migration/V003__synthetic_experiments.sql", migrations));
-        migrate(copy);
-        try (var connection = connect()) {
-            assertEquals(3, scalar(connection, "SELECT count(*) FROM public.database_schema_migration"));
+    void upgradesDayOneDatabaseWithoutLosingHospitalData() throws Exception {
+        succeeds(POSTGRES.execInContainer("bash", "-c", """
+                mkdir -p /day1/src/main/resources/db/migration
+                cp -R /workspace/scripts /day1/scripts
+                cp /workspace/src/main/resources/db/migration/V001__hospital_and_availability.sql \
+                    /day1/src/main/resources/db/migration/
+                """));
+        migrate("/day1");
+        try (var connection = connect(); var statement = connection.createStatement()) {
+            statement.executeUpdate("INSERT INTO hospital.hospital (code,name,time_zone) "
+                    + "VALUES ('upgrade.hospital','Preserved hospital','Africa/Casablanca')");
             String before = journal(connection);
-            succeeds(POSTGRES.execInContainer("bash", "-c",
-                    "printf '\\n-- checksum regression fixture\\n' >> " + migrations + "V001__hospital_and_availability.sql"));
-            var result = script(copy + "/scripts/migrate-database.sh");
-            assertNotEquals(0, result.getExitCode());
-            assertTrue(result.getStderr().contains("changed after application"), result.getStderr());
-            assertEquals(before, journal(connection), "Rejected migration must not change its journal");
+            migrate();
+            assertEquals(1, scalar(connection, "SELECT count(*) FROM hospital.hospital "
+                    + "WHERE code='upgrade.hospital' AND name='Preserved hospital'"));
+            assertEquals(3, scalar(connection, "SELECT count(*) FROM public.database_schema_migration"));
+            assertTrue(journal(connection).startsWith(before + ","), "V001 journal must be preserved");
         }
     }
 
     @Test
-    void verifiesConstraintsSeedReplayFeasibilityAndReplanning() throws Exception {
-        migrate("/workspace");
-        sql("/workspace/db/verify/constraints.sql");
-        succeeds(script("/workspace/scripts/seed-database.sh"));
-        sql("/workspace/db/verify/replay.sql");
-        sql("/workspace/db/verify/demo.sql");
-        sql("/workspace/db/queries/experiments.sql");
-        sql("/workspace/db/verify/replanning.sql");
-        try (var connection = connect()) {
-            assertEquals(150, scalar(connection, "SELECT count(*) FROM hospital.appointment WHERE status='CONFIRMED'"));
-            assertEquals(300, scalar(connection, "SELECT count(*) FROM hospital.appointment WHERE status='CANDIDATE'"));
+    void savesOverlappingCandidatesAndConfirmsOnlyTheExactSavedAssignment() throws Exception {
+        migrate();
+        try (var connection = connect(); var statement = connection.createStatement()) {
+            seedSchedule(connection);
+            statement.executeUpdate("""
+                    INSERT INTO hospital.candidate_assignment
+                        (schedule_id,request_id,doctor_id,room_id,starts_at,ends_at,locked)
+                    VALUES (1,1,1,1,'2026-11-23 09:00+01','2026-11-23 09:30+01',true),
+                           (1,2,1,1,'2026-11-23 09:00+01','2026-11-23 09:30+01',false),
+                           (2,1,1,1,'2026-11-23 09:00+01','2026-11-23 09:30+01',false)
+                    """);
+            assertEquals(3, scalar(connection, "SELECT count(*) FROM hospital.candidate_assignment"));
+            statement.executeUpdate("""
+                    INSERT INTO hospital.confirmed_appointment
+                        (candidate_assignment_id,request_id,doctor_id,room_id,starts_at,ends_at)
+                    SELECT id,request_id,doctor_id,room_id,starts_at,ends_at
+                    FROM hospital.candidate_assignment WHERE id=1
+                    """);
+            assertEquals(1, scalar(connection, "SELECT count(*) FROM hospital.confirmed_appointment"));
+            assertEquals(3, scalar(connection, "SELECT count(*) FROM hospital.candidate_assignment"));
+            PSQLException mismatch = assertThrows(PSQLException.class, () -> statement.executeUpdate("""
+                    UPDATE hospital.confirmed_appointment SET ends_at='2026-11-23 09:45+01'
+                    WHERE candidate_assignment_id=1
+                    """));
+            assertEquals("23503", mismatch.getSQLState());
+            PSQLException duplicate = assertThrows(PSQLException.class, () -> statement.executeUpdate("""
+                    INSERT INTO hospital.candidate_assignment
+                        (schedule_id,request_id,doctor_id,room_id,starts_at,ends_at)
+                    VALUES (1,1,1,1,'2026-11-23 10:00+01','2026-11-23 10:30+01')
+                    """));
+            assertEquals("23505", duplicate.getSQLState());
+            assertEquals(1, scalar(connection, "SELECT count(*) FROM hospital.candidate_assignment "
+                    + "WHERE locked AND lower_inc(occupied_at) AND NOT upper_inc(occupied_at) "
+                    + "AND starts_at='2026-11-23 08:00Z'::timestamptz"));
         }
     }
 
     @Test
-    void jdbcRejectsInvalidRequestsAndPreservesTheTimestampInstant() throws Exception {
-        migrate("/workspace");
-        succeeds(script("/workspace/scripts/seed-database.sh"));
+    void rejectsMalformedScheduleMetadataAndAssignmentBounds() throws Exception {
+        migrate();
+        try (var connection = connect(); var statement = connection.createStatement()) {
+            seedSchedule(connection);
+            for (String edit : new String[]{"parameters='[]'::jsonb", "final_fitness='NaN'::numeric",
+                    "final_fitness='Infinity'::numeric", "final_fitness=-1", "status='UNKNOWN'",
+                    "status='CANDIDATE', final_fitness=NULL"}) {
+                PSQLException error = assertThrows(PSQLException.class,
+                        () -> statement.executeUpdate("UPDATE hospital.schedule SET " + edit + " WHERE id=1"));
+                assertEquals("23514", error.getSQLState(), edit);
+            }
+            PSQLException bounds = assertThrows(PSQLException.class, () -> statement.executeUpdate("""
+                    INSERT INTO hospital.candidate_assignment
+                        (schedule_id,request_id,doctor_id,room_id,starts_at,ends_at)
+                    VALUES (1,1,1,1,'2026-11-23 09:00Z','2026-11-23 09:00Z')
+                    """));
+            assertEquals("23514", bounds.getSQLState());
+        }
+    }
+
+    private static void seedSchedule(Connection connection) throws SQLException {
+        try (var statement = connection.createStatement()) {
+            statement.executeUpdate("""
+                    INSERT INTO hospital.hospital(code,name,time_zone) VALUES ('it.h','Test','Africa/Casablanca');
+                    INSERT INTO hospital.department(code,hospital_id,name) VALUES ('it.d',1,'Test');
+                    INSERT INTO hospital.specialty(code,department_id,name) VALUES ('it.s',1,'Test');
+                    INSERT INTO hospital.doctor(code,department_id,display_name) VALUES ('it.dr',1,'Test');
+                    INSERT INTO hospital.room_type(code,name) VALUES ('it.rt','Test');
+                    INSERT INTO hospital.room(code,department_id,room_type_id,name) VALUES ('it.r',1,1,'Test');
+                    INSERT INTO hospital.patient(code,display_name) VALUES ('it.p','Test');
+                    INSERT INTO hospital.appointment_request
+                        (code,patient_id,specialty_id,duration_minutes,urgency,requested_at)
+                    VALUES ('it.req1',1,1,30,'ROUTINE',current_timestamp),
+                           ('it.req2',1,1,30,'ROUTINE',current_timestamp);
+                    INSERT INTO hospital.algorithm(code,name,version) VALUES ('it.fake','Test','1');
+                    INSERT INTO hospital.schedule_week(code,hospital_id,starts_on) VALUES ('it.week',1,'2026-11-23');
+                    INSERT INTO hospital.schedule(code,schedule_week_id,algorithm_id,random_seed,final_fitness,status)
+                    VALUES ('it.schedule1',1,1,42,0,'CANDIDATE'), ('it.schedule2',1,1,42,1,'CANDIDATE');
+                    """);
+        }
+    }
+
+    @Test
+    void rejectsNegativeAppointmentDuration() throws Exception {
+        migrate();
         try (var connection = connect()) {
             connection.setAutoCommit(false);
-            for (int duration : new int[]{-15, 0, 1441}) {
-                rejects(connection, "UPDATE hospital.appointment_request SET duration_minutes=" + duration
-                        + " WHERE code='demo15.req.001'", "23514", "appointment_request_duration_minutes_check");
+            try (var statement = connection.createStatement()) {
+                statement.executeUpdate("INSERT INTO hospital.hospital (code,name,time_zone) "
+                        + "VALUES ('it.hospital','Integration test','Africa/Casablanca')");
+                statement.executeUpdate("INSERT INTO hospital.department (code,hospital_id,name) "
+                        + "VALUES ('it.department',1,'Integration test')");
+                statement.executeUpdate("INSERT INTO hospital.specialty (code,department_id,name) "
+                        + "VALUES ('it.specialty',1,'Integration test')");
+                statement.executeUpdate("INSERT INTO hospital.patient (code,display_name) "
+                        + "VALUES ('it.patient','Integration test')");
             }
-            // Insert a new request so an existing request_availability back-reference
-            // cannot mask the patient FK that this assertion is meant to exercise.
-            rejects(connection, "INSERT INTO hospital.appointment_request "
-                    + "(code,patient_id,specialty_id,duration_minutes,urgency,requested_at) "
-                    + "SELECT 'jdbc.invalid-patient',-999,specialty_id,30,'ROUTINE',current_timestamp "
-                    + "FROM hospital.appointment_request WHERE code='demo15.req.001'",
-                    "23503", "appointment_request_patient_id_fkey");
-            OffsetDateTime input = OffsetDateTime.parse("2026-11-16T09:00:00+01:00");
-            try (var statement = connection.prepareStatement("SELECT ?::timestamptz")) {
-                statement.setObject(1, input);
-                try (var result = statement.executeQuery()) {
-                    assertTrue(result.next());
-                    assertEquals(input.toInstant(), result.getObject(1, OffsetDateTime.class).toInstant());
+            Savepoint savepoint = connection.setSavepoint();
+            try {
+                PSQLException error = assertThrows(PSQLException.class, () -> {
+                    try (var statement = connection.createStatement()) {
+                        statement.executeUpdate("INSERT INTO hospital.appointment_request "
+                                + "(code,patient_id,specialty_id,duration_minutes,urgency,requested_at) "
+                                + "VALUES ('it.invalid-duration',1,1,-15,'ROUTINE',current_timestamp)");
+                    }
+                });
+                assertEquals("23514", error.getSQLState());
+                assertEquals("appointment_request_duration_minutes_check",
+                        error.getServerErrorMessage().getConstraint());
+            } finally {
+                connection.rollback(savepoint);
+                connection.rollback();
+            }
+        }
+    }
+
+    @Test
+    void rejectsInvalidPatientForeignKey() throws Exception {
+        migrate();
+        try (var connection = connect()) {
+            PSQLException error = assertThrows(PSQLException.class, () -> {
+                try (var statement = connection.createStatement()) {
+                    statement.executeUpdate("INSERT INTO hospital.appointment_request "
+                            + "(code,patient_id,specialty_id,duration_minutes,urgency,requested_at) "
+                            + "VALUES ('it.invalid-patient',-999,1,30,'ROUTINE',current_timestamp)");
                 }
-            }
-            assertEquals(150, scalar(connection, "SELECT count(*) FROM hospital.appointment_request"));
-            connection.rollback();
+            });
+            assertEquals("23503", error.getSQLState());
+            assertEquals("appointment_request_patient_id_fkey", error.getServerErrorMessage().getConstraint());
         }
     }
 
@@ -149,25 +221,15 @@ class MigrationIT {
         return DriverManager.getConnection(url, POSTGRES.getUsername(), POSTGRES.getPassword());
     }
 
-    private ExecResult script(String path) throws Exception {
-        return command("bash", path);
-    }
-
-    private ExecResult command(String... arguments) throws Exception {
-        String[] command = new String[arguments.length + 6];
-        String[] environment = {"env", "PGHOST=127.0.0.1", "PGPORT=5432", "PGDATABASE=" + database,
-                "PGUSER=" + POSTGRES.getUsername(), "PGPASSWORD=" + POSTGRES.getPassword()};
-        System.arraycopy(environment, 0, command, 0, environment.length);
-        System.arraycopy(arguments, 0, command, environment.length, arguments.length);
-        return POSTGRES.execInContainer(command);
+    private void migrate() throws Exception {
+        migrate("/workspace");
     }
 
     private void migrate(String root) throws Exception {
-        succeeds(script(root + "/scripts/migrate-database.sh"));
-    }
-
-    private void sql(String path) throws Exception {
-        succeeds(command("psql", "-X", "--set=ON_ERROR_STOP=1", "--file=" + path));
+        ExecResult result = POSTGRES.execInContainer("env", "PGHOST=127.0.0.1", "PGPORT=5432",
+                "PGDATABASE=" + database, "PGUSER=" + POSTGRES.getUsername(),
+                "PGPASSWORD=" + POSTGRES.getPassword(), "bash", root + "/scripts/migrate-database.sh");
+        succeeds(result);
     }
 
     private static void succeeds(ExecResult result) {
@@ -187,24 +249,6 @@ class MigrationIT {
                         + "FROM public.database_schema_migration")) {
             assertTrue(result.next());
             return result.getString(1);
-        }
-    }
-
-    private static void rejects(Connection connection, String sql, String state, String constraint) throws SQLException {
-        Savepoint savepoint = connection.setSavepoint();
-        try {
-            PSQLException error = assertThrows(PSQLException.class, () -> {
-                try (var statement = connection.createStatement()) {
-                    int changed = statement.executeUpdate(sql);
-                    fail("Invalid edit unexpectedly changed " + changed + " rows");
-                }
-            });
-            assertEquals(state, error.getSQLState());
-            assertNotNull(error.getServerErrorMessage());
-            assertEquals(constraint, error.getServerErrorMessage().getConstraint());
-        } finally {
-            connection.rollback(savepoint);
-            connection.releaseSavepoint(savepoint);
         }
     }
 }

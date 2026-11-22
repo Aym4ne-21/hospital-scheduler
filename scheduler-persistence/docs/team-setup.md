@@ -1,47 +1,33 @@
 # Database setup on the four team PCs
 
-Aymane, Amine, Ilyass and Youness each run a local PostgreSQL container with the
-same schema and synthetic seed. Each PC has its own database, volume and local
-password. Record each member's results in the
-[Day 1 verification record](proofs/J1-IL.md); instructions alone do not establish
-that a PC has passed.
+Aymane, Amine, Ilyass and Youness should use the same committed feature revision
+and run a separate local PostgreSQL container on their own PC. Record the actual
+results in [J1-IL](proofs/J1-IL.md); a written checklist is not evidence that a
+PC passed.
 
-## 1. Use the same source and tools
+## Requirements
 
-Use the committed database feature branch once it is published, or `develop`
-after the feature is merged. Compare the full commit SHA across all four PCs.
-Use a clean checkout for the shared verification; uncommitted changes are not
-identified by the commit SHA. From the repository root:
+Each PC needs Git, JDK 17 and Docker with Compose v2 and Linux containers. The
+Maven wrapper supplies Maven 3.9.9. The first build needs Maven Central and the
+container registry. Compare the full commit SHA on all four PCs.
+
+From the repository root, check:
 
 ```bash
 git rev-parse HEAD
-git status --short
 java -version
 docker info
 docker compose version
 ```
 
-All four PCs need JDK 17, Git and a running Docker installation with Compose v2
-and Linux containers. The Maven wrapper downloads Maven 3.9.9; a separate Maven
-installation is not required. Initial builds need access to Maven Central and
-the container registry. The test image is `postgres:18.7-bookworm`.
+PowerShell can use `.\mvnw.cmd -v`; Linux and Git Bash can use `bash mvnw -v`.
+On Linux, Docker access must work for the same user that runs Maven. On Windows,
+start Docker Desktop first.
 
-Verify Maven's actual Java runtime, since it can differ from the IDE:
+## Start the local database
 
-| Terminal | Command from repository root |
-| --- | --- |
-| Linux / Git Bash | `bash mvnw -v` |
-| Windows PowerShell | `.\mvnw.cmd -v` |
-
-In IntelliJ, also set the project SDK and Maven runner JRE to JDK 17. On Windows,
-start Docker Desktop before testing. On Linux, `docker info` must succeed for
-the same user running Maven. Docker errors at this stage must be resolved before
-claiming a successful Testcontainers run.
-
-## 2. Create the local configuration
-
-Create the file only if it does not already exist, preserving an existing local
-password. Run from the repository root.
+From the repository root, copy the example configuration only if you do not
+already have a local `.env`.
 
 Linux / Git Bash:
 
@@ -51,7 +37,7 @@ if [ ! -f scheduler-persistence/.env ]; then
 fi
 ```
 
-Windows PowerShell:
+PowerShell:
 
 ```powershell
 if (-not (Test-Path scheduler-persistence/.env)) {
@@ -59,105 +45,67 @@ if (-not (Test-Path scheduler-persistence/.env)) {
 }
 ```
 
-Edit `scheduler-persistence/.env` locally. Set `POSTGRES_PASSWORD` to a password
-chosen on that PC. Keep `POSTGRES_DB=project15_dev`, `POSTGRES_USER=project15` and
-`PROJECT15_DB_PORT=55432` unless that PC needs another port. The file is ignored
-by Git. Record only variable names and non-secret connection settings in reports.
+Set a local `POSTGRES_PASSWORD` in `.env`. Keep the default database, user and
+port unless the PC needs a different port. Never put the password in shared
+evidence or a JDBC URL.
 
-## 3. Start, migrate and seed
-
-These commands work in both PowerShell and Bash. From the repository root:
+Then, from `scheduler-persistence`:
 
 ```bash
-cd scheduler-persistence
 docker compose up --detach --wait postgres
 docker compose exec -T postgres bash /workspace/scripts/migrate-database.sh
-docker compose exec -T postgres bash /workspace/scripts/seed-database.sh
 docker compose ps
-```
-
-The service should be healthy and publish `127.0.0.1:55432`. Repeat the migration
-command: it should report V001–V003 as already applied. Repeating the seed should
-report that the dataset already exists and preserve current rows.
-
-Check the connection and migration journal from the container:
-
-```bash
-docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -c "SELECT current_database(), current_user;"
 docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -c "SELECT version, filename FROM public.database_schema_migration ORDER BY version;"
-docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -c "SELECT status, count(*) FROM hospital.appointment GROUP BY status ORDER BY status;"
 ```
 
-Expected with the default configuration and a freshly seeded database:
-`project15_dev` / `project15`, migration versions 1–3, 150 `CONFIRMED` appointments
-and 300 `CANDIDATE` appointments. Existing edited datasets may have other counts;
-the seed does not reset them.
+Expected: the service is healthy and migration versions 1, 2 and 3 are recorded.
+Repeating the migration command should report all three as already applied.
+See [migration compatibility](database-setup.md#migrations) if this PC applied
+the earlier development V002.
 
-## 4. Check the connection from each host PC
+## Test the host connection
 
-In IntelliJ's Database tool, create a PostgreSQL data source and use **Test
-Connection** with the settings below. This checks the host-side connection;
-the preceding container commands only check the connection inside the container.
+Use IntelliJ's Database tool to create a PostgreSQL data source and select **Test
+Connection**:
 
-| Setting | Default value on each PC |
+| Setting | Default |
 | --- | --- |
 | Host / port | `127.0.0.1` / `55432` |
 | Database / user | `project15_dev` / `project15` |
-| Password | That PC's local `POSTGRES_PASSWORD` |
+| Password | Local `POSTGRES_PASSWORD` from `.env` |
 | JDBC URL | `jdbc:postgresql://127.0.0.1:55432/project15_dev?currentSchema=hospital,public` |
 
-Adjust these settings to match that PC's `.env` if its defaults changed. Execute
-`SELECT current_database(), current_user;` in the IDE SQL console and record the
-result. Keep the password outside the URL and any shared evidence. The current
-application has no database startup wiring; launching its placeholder `Main`
-does not test a connection.
-
-If a host `psql` client is available, this is an additional connection check that
-prompts for the password instead of putting it in shell history:
+Then run `SELECT current_database(), current_user;` and record the result. If a
+host `psql` client is installed, this also checks the host connection and prompts
+for the password:
 
 ```bash
-psql -h 127.0.0.1 -p 55432 -U project15 -d project15_dev -W -v ON_ERROR_STOP=1 -c "SELECT current_database(), current_user;"
+psql -h 127.0.0.1 -p 55432 -U project15 -d project15_dev -W -c "SELECT current_database(), current_user;"
 ```
 
-## 5. Run the build and integration suite
+## Run the migration tests
 
-Return to the repository root with `cd ..`, then use the commands for that PC.
-
-Linux / Git Bash:
+From the repository root, on Linux / Git Bash:
 
 ```bash
 bash mvnw clean verify
-bash mvnw -pl scheduler-persistence -am -Pdatabase-it verify
+bash mvnw -pl scheduler-persistence -am -Ppersistence-it verify
 ```
 
-Windows PowerShell:
+On Windows PowerShell:
 
 ```powershell
 .\mvnw.cmd clean verify
-.\mvnw.cmd -pl scheduler-persistence -am -Pdatabase-it verify
+.\mvnw.cmd -pl scheduler-persistence -am -Ppersistence-it verify
 ```
 
-Both commands must finish with `BUILD SUCCESS`. The database profile must run
-all four `MigrationIT` methods without failures, errors or skipped tests. Its
-container and fresh databases are separate from the development Compose volume;
-it does not read `.env`. A normal build without the profile does not run those
-integration tests.
+The integration test uses its own disposable Testcontainers PostgreSQL instance,
+not the local Compose volume or `.env`. It should run 28 tests (six migration, seven hospital, eight schedule and seven exclusion tests) with no failures,
+errors or skips. Attach its Failsafe text report and record each PC's OS, Java,
+Maven, Docker/Compose versions, commit SHA, host connection result and command
+outcomes in [J1-IL](proofs/J1-IL.md).
 
-Attach the text report from
-`scheduler-persistence/target/failsafe-reports/com.hospitalscheduler.persistence.MigrationIT.txt`
-to the delivery evidence and fill the member's row in [J1-IL](proofs/J1-IL.md),
-including the date, OS, Java/Maven/Docker versions, full commit SHA, connection
-result and command outcomes. A missing/failed report leaves that check pending.
-
-## Troubleshooting and stopping
-
-| Symptom | Check |
-| --- | --- |
-| Docker permission denied / no valid Docker environment | Run `docker info` as the same user as Maven; check daemon access or start Docker Desktop. Do not treat the native SQL fallback as a Docker PASS. |
-| Port 55432 already in use | Choose another `PROJECT15_DB_PORT` in the local `.env`, rerun `docker compose up --detach --wait postgres`, and use that port in the IDE/client. |
-| Password fails after editing `.env` | An existing volume retains its initialized credentials. Use those credentials or update the role through an administrator connection; editing `.env` does not reset a stored password. |
-| Windows shell cannot run `.sh` | Use the direct Compose commands above, which execute Bash inside the Linux container, or use Git Bash for the helper scripts. |
-
-From `scheduler-persistence`, `docker compose logs --tail=100 postgres` shows
-recent logs and `docker compose down` stops the service while retaining its
-volume. Keep the volume when replaying migrations.
+If Docker reports permission denied or Testcontainers cannot find Docker, fix
+Docker access before recording a pass. The native SQL fallback is not a Docker or
+Testcontainers pass. Use `docker compose logs --tail=100 postgres` for local logs;
+`docker compose down` stops the service and retains its volume.

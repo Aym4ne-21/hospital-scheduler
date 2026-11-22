@@ -1,65 +1,37 @@
-# Persistence integration decisions
+# Database decisions
 
-Integrated on 21 November 2026 after reading the actual parent/module POMs,
-shared domain classes, optimization contracts and existing tests. The source
-folder was a separate SQL deliverable. Current setup instructions and evidence
-are maintained in this module; the superseded standalone brief and reports
-have been removed.
+- The schema is integrated into the existing Java 17 `scheduler-persistence`
+  Maven module; no second Maven project or database dependency was added to core.
+- JUnit follows the parent project's 5.11.4 version. PostgreSQL JDBC and
+  Testcontainers versions are managed by the parent POM.
+- The initial schema, Compose setup, migration runner and basic migration test
+  are Day 1 scope. Day 2 task 1 adds V002 with schedule metadata, candidate
+  assignments and confirmed reservations in separate tables as proposed in the plan.
+- Confirmations reference exact saved assignments through a composite foreign key;
+  this prevents a reservation silently diverging from its candidate version.
+- V003 adds global GiST doctor/room exclusions on confirmed reservations, without
+  schedule IDs. This protects bookings across versions and concurrent transactions;
+  half-open ranges permit adjacency and candidates still allow conflicts.
+- Confirmation transactions remain subsequent Day 2 work. No operational
+  confirmation flow is enabled yet.
+  Sample data and experiments remain subsequent work.
+- V001 remains the initial migration. Once applied, future changes must use a
+  new numbered migration instead of editing it.
+- The hospital repository uses `Instant` for stored timestamps and the hospital's
+  explicit `ZoneId` for local week boundaries. Sub-microsecond input is rejected
+  rather than rounded by PostgreSQL.
 
-| Concern | Integration decision |
-| --- | --- |
-| Module | Use the existing `scheduler-persistence` child of `com.hospitalscheduler:hospital-scheduler:1.0-SNAPSHOT`; no separate database Maven project. |
-| Java and tests | Inherit Java 17 and JUnit 5.11.4. Manage JDBC/Testcontainers in the parent. Align Failsafe with the parent's Surefire 3.5.2. |
-| Packages | Database integration tests use `com.hospitalscheduler.persistence`, matching the project's package prefix. |
-| Boundaries | PostgreSQL driver is runtime-only in persistence. Tests use Testcontainers. `scheduler-core` has no database/UI dependencies. |
-| Test lifecycle | `database-it` explicitly runs Failsafe integration tests. Ordinary reactor builds run unit tests without Docker; the requested integration profile fails if Docker is unavailable. |
-| Migrations | Keep V001–V003 bytes and their SHA-256 history, the existing transaction/advisory-lock runner, and one journal. Migration resources ship in the persistence JAR. |
-| Operations | Keep Compose, scripts, queries, fixtures and docs under the persistence module; paths resolve from the scripts' locations. |
-| Data compatibility | Preserve legacy `project15` lock keys, connection defaults, fixture codes and SQL custom settings. Existing migration journals and seed markers remain valid. |
-| Time | Keep explicit hospital timezone and fixture instants. The demo remains `Europe/Paris`; no unused timezone environment variable is advertised. |
-| Secrets | Keep `.env.example` with an empty password and use root ignore rules for local `.env`. The standalone `.gitignore` is unnecessary. |
-| Scope | Deliver runnable SQL infrastructure and tests. Repositories and application startup wiring require the core/SQL gaps below to be resolved. |
+The optimizer domain's single doctor specialty, integer urgency and local date-time
+slots do not fully match the SQL model. The repository's immutable `HospitalWeek`
+DTO preserves those details without changing existing optimizer contracts.
+Conversion to optimizer objects still requires team agreement; see the
+[core contract](../../docs/contracts.md).
 
-## Gaps established against the actual core
-
-- `Doctor.specialty` is one `String`; `doctor_specialty` is many-to-many and the
-  seed has two doctors with two specialties. Do not select an arbitrary specialty
-  or duplicate a doctor ID in an optimization problem. Decide whether to extend
-  the core or explicitly constrain a repository's input.
-- Core specialty/equipment fields are strings; SQL has stable codes and display
-  names. Use a documented consistent identity (codes are the natural adapter
-  choice), not locale-dependent name matching.
-- Core urgency is an `int` with no defined range/order. SQL uses
-  `URGENT/PRIORITY/ROUTINE`. No numeric ordering has been invented.
-- Core time slots use `LocalDateTime`; SQL stores instants. Read `OffsetDateTime`
-  and convert through the owning hospital's `ZoneId`. Resolve ambiguous/missing
-  local times explicitly when saving. Never rely on the machine's default zone.
-- Core appointments require a request, doctor, room and slot; SQL permits
-  unassigned candidates. A repository cannot silently construct or drop an
-  incomplete SQL row as a core `Appointment`.
-- Core `Schedule` is only an appointment list. It has no database ID, week,
-  publication state, lock or reservation provenance. Keep that metadata in the
-  persistence/application boundary when that API is designed.
-- `FitnessBreakdown` minimizes `(hardViolations, softCost)` lexicographically.
-  SQL's existing `final_fitness` and `fitness_point.fitness` are illustrative
-  scalar objectives. Runs have final violation counts, but schedules and history
-  do not retain complete core breakdowns. Add a follow-up migration before
-  storing real `OptimizationResult` values; do not encode them into the fixture
-  formula `1000 * violations + delay` or infer missing values.
-- SQL room types, equipment quantities and patient preferences have no core
-  representation. The core also has no standardized optimization status
-  vocabulary, experiment model, elapsed-time budget or complete lock protocol.
-- Replanning transfers the original locked reservation rows. An archived
-  schedule therefore is not a full immutable snapshot. Separate operational
-  reservations from versioned assignments if immutable history is required.
-
-The shared API is documented in [core contracts](../../docs/contracts.md).
-These are concrete API design gaps, not runtime configuration errors; adding
-an ORM or a second copy of the domain would not resolve them.
-
-## References
-
-- [Testcontainers PostgreSQL module](https://java.testcontainers.org/modules/databases/postgres/)
-- [pgJDBC timestamp mapping](https://jdbc.postgresql.org/documentation/query/)
-- [PostgreSQL official image](https://hub.docker.com/_/postgres)
-- [Maven Failsafe lifecycle](https://maven.apache.org/surefire/maven-failsafe-plugin/usage.html)
+- `ScheduleRepositoryJdbc` inserts immutable candidate versions with unique caller
+  codes. Duplicate codes fail instead of overwriting historical or confirmed data.
+  Assignments are inserted as one JDBC batch in the same transaction as metadata.
+- Algorithm codes identify fixed names/versions; a new implementation version must
+  use a new code. This prevents later saves changing historical algorithm metadata.
+- Repository snapshots preserve JSON parameters, exact numeric fitness, signed
+  64-bit seeds, lock flags and absolute instants. PostgreSQL validates and
+  canonicalizes parameter JSON without an additional JSON-library dependency.

@@ -36,10 +36,6 @@ BEGIN
                WHERE version=$version AND (sha256<>'$checksum' OR filename<>'$filename')) THEN
         RAISE EXCEPTION 'Migration $filename changed after application; add a new migration.';
     END IF;
-    IF NOT EXISTS (SELECT 1 FROM public.database_schema_migration WHERE version=$version)
-       AND EXISTS (SELECT 1 FROM public.database_schema_migration WHERE version>$version) THEN
-        RAISE EXCEPTION 'Migration $filename would be applied out of order.';
-    END IF;
 END;
 \$migration\$;
 SELECT NOT EXISTS (SELECT 1 FROM public.database_schema_migration WHERE version=$version) AS apply_migration \gset

@@ -7,7 +7,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-project15_dev}
       POSTGRES_USER: ${POSTGRES_USER:-project15}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env}
-      # libpq variables used by the migration and seed scripts inside the container.
+      # libpq variables used by the migration script inside the container.
       PGDATABASE: ${POSTGRES_DB:-project15_dev}
       PGUSER: ${POSTGRES_USER:-project15}
       PGPASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in your local .env}
@@ -19,7 +19,6 @@ services:
       # PostgreSQL 18 images keep versioned PGDATA underneath this directory.
       - postgres-data:/var/lib/postgresql
       - ./scripts:/workspace/scripts:ro
-      - ./db:/workspace/db:ro
       - ./src/main/resources/db/migration:/workspace/src/main/resources/db/migration:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]

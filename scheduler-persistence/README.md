@@ -1,81 +1,46 @@
-# Scheduler persistence
+# Scheduler persistence — hospital and schedule database
 
-PostgreSQL assets for the Java 17 Hospital Scheduler. This module inherits the
-`com.hospitalscheduler:hospital-scheduler` parent and depends on `scheduler-core`.
-The PostgreSQL JDBC driver is available at runtime; JUnit and Testcontainers are
-test dependencies managed by the parent. The core remains independent of SQL.
+This module contains the PostgreSQL hospital and schedule schemas, JDBC
+repositories, local connection setup and integration tests. The shared core
+has no database dependency.
 
-## Development database
+## Start a local database
 
-Run these commands from this directory (Windows: use Git Bash):
+From this directory (use Git Bash on Windows):
 
 ```bash
 cp .env.example .env
-# Set POSTGRES_PASSWORD in .env.
+# Set a local POSTGRES_PASSWORD in .env.
 bash scripts/docker-database.sh up
 bash scripts/docker-database.sh migrate
-bash scripts/docker-database.sh seed
 bash scripts/docker-database.sh status
 ```
 
-The database listens on `localhost:55432`. Migrations and demonstration data are
-explicit operations. `bash scripts/docker-database.sh down` preserves the volume.
+The database listens on `127.0.0.1:55432`. Stop it with
+`bash scripts/docker-database.sh down`; its volume is retained.
 
-## Verification
+## Verify
 
-From the **repository root**, using the existing Maven wrapper:
+From the repository root:
 
 ```bash
-# Build all modules and run unit tests; Docker is not needed.
 bash mvnw verify
-
-# Run the persistence integration tests and their upstream core module.
-bash mvnw -pl scheduler-persistence -am -Pdatabase-it verify
+bash mvnw -pl scheduler-persistence -am -Ppersistence-it verify
 ```
 
-On Windows, replace `bash mvnw` with `.\mvnw.cmd`. The `database-it` profile
-requires Docker and fails if it is unavailable. It creates a separate container
-and a new database for each test; it does not use the development database or
-`.env`. Reports are in `target/failsafe-reports/` inside this module. `mvn test`
-compiles integration tests but only runs unit tests; a normal `verify` does not
-activate the database profile.
+The database profile checks fresh migrations, V001 upgrades, replay, candidate
+assignments, confirmation references and hospital/schedule repository round trips
+and rollback.
+Its default configuration requires Docker.
+See [four-PC setup](docs/team-setup.md), [schema](docs/database-schema.md),
+[database setup](docs/database-setup.md) and [Day 1 evidence](docs/proofs/J1-IL.md).
 
-SQL-only alternatives, from this directory:
-
-```bash
-# Separate container and temporary cluster; no development .env required.
-bash scripts/docker-database.sh verify
-# Or use installed PostgreSQL server/client tools and contrib.
-bash scripts/verify-database.sh
-```
-
-## Layout
-
-```text
-pom.xml                             Existing persistence module, parent-managed dependencies
-compose.yaml / .env.example          Local PostgreSQL service and credential template
-src/main/resources/db/migration/     Versioned SQL, included in the module JAR
-src/test/java/com/hospitalscheduler/persistence/
-                                    MigrationIT, executed by the database-it profile
-db/seed/                            Explicit synthetic demonstration dataset
-db/verify/                          Constraint, replay, feasibility and replanning checks
-db/queries/                         Example experiment queries
-scripts/                            Migration, seed and verification entry points
-docs/                               Setup, schema, integration decisions and Day 1 evidence
-```
-
-The seed contains 20 doctors, 12 rooms, 130 patients, 150 requests, one published
-schedule, two candidates, 80 synthetic runs and 1680 synthetic fitness points.
-These are demonstration fixtures, not measured optimizer results.
-
-The current delivery supplies schema, migration tooling and database tests.
-Application repositories and UI database wiring are not implemented: the shared
-core does not yet express several SQL concepts. See the concrete mapping and
-gaps before implementing an adapter; do not silently truncate database data.
-
-- [Setup and verification](docs/database-setup.md)
-- [Setup and connection checklist for the four PCs](docs/team-setup.md)
-- [Schema and mapping to the existing core](docs/database-schema.md)
-- [Integration decisions and remaining contract gaps](docs/decisions.md)
-- [Day 1 status and team verification record](docs/proofs/J1-IL.md)
-- [Project architecture](../docs/contracts.md)
+V002 adds saved schedules, candidate assignments and confirmed reservations.
+`HospitalRepositoryJdbc` now loads hospital weeks and saves edits transactionally;
+see [repository usage](docs/database-setup.md#hospital-repository).
+V003 adds global doctor/room overlap exclusions for confirmed appointments.
+`ScheduleRepositoryJdbc` saves candidate versions and their assignment batches
+atomically, then loads them by code or hospital/week. See
+[schedule repository usage](docs/database-setup.md#schedule-repository).
+The application confirmation transaction remains subsequent work.
+Experiment tables and demo seeds remain later work.

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Sourced by the migration/seed entry points; never prints credentials.
+# Sourced by the migration entry point; never prints credentials.
 set -euo pipefail
 PERSISTENCE_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 if ! command -v psql >/dev/null 2>&1; then
