@@ -233,3 +233,36 @@ From the repository root on Windows:
 ```
 
 A successful build verifies the compiled core and its current tests. It does not establish correctness of unimplemented algorithms or end-to-end hospital scheduling.
+
+PostgreSQL migrations, database setup and the four-PC verification checklist are
+documented in the [persistence module](../scheduler-persistence/README.md).
+
+## 9. Persistence integration
+
+The `com.hospitalscheduler.repository` contracts expose the shared optimizer
+objects. `HospitalRepository.loadProblem(hospitalCode, monday)` returns an
+`OptimizationProblem`. `ScheduleRepository.saveResult(metadata, result, locks)`
+accepts an `OptimizationResult`; `loadResult(code, problem)` restores it, and
+`loadSchedule(code, problem)` returns the shared `Schedule`. The supplied problem
+provides the existing request/doctor/room objects used to hydrate appointments.
+
+The persistence adapter converts database instants through the hospital zone,
+combines doctor absences/breaks, maps specialty/equipment codes to strings, and
+maps urgency with a documented configurable integer convention. Unsupported
+requirements are rejected explicitly. The existing domain constructors and
+optimizer interfaces remain the integration authority.
+
+`HospitalWeek` is the richer editing data contract. `ScheduleSnapshot` represents
+storage metadata and assignment IDs; its score/history use `FitnessBreakdown`.
+Optimizer code continues to consume `OptimizationProblem`, `Schedule` and
+`OptimizationResult`. V004 preserves both score components, every history entry
+and optimizer status. Legacy scalar scores remain available without automatic
+conversion into unknown hard/soft values.
+
+See [repository usage and mapping rules](../scheduler-persistence/docs/database-setup.md#shared-core-integration).
+
+`HospitalRepository` exposes explicit deletion methods for editable hospital
+entities. Scoped resources require hospital code plus entity code; shared patients
+and catalogs use global codes. Missing records return false; external references
+raise `HospitalEntityInUseException`. Each deletion includes its owned details in
+one transaction while preserving saved schedule history.
