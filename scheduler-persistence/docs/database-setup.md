@@ -39,11 +39,16 @@ checks, and uses finite half-open time ranges.
 
 `V002__schedules.sql` adds algorithms, hospital weeks, saved schedules, candidate
 assignments and confirmed reservations. Running the same migration command on a
-V001 database applies V002 and V003 and preserves valid existing data. All three
+V001 database applies V002–V004 and preserves valid existing data. All four
 versions should be recorded in the migration journal. V003 adds global doctor
 and room GiST exclusions to confirmed reservations; candidate overlaps remain
 allowed. Existing conflicting confirmations make V003 fail and roll back, so
 resolve those bookings explicitly before retrying.
+
+V004 adds the shared `FitnessBreakdown` components, optimizer status, ordered
+fitness history and the saved time-zone context. Legacy scalar scores are retained
+in `final_fitness`; their hard/soft components are left unknown. New writes use
+`hard_violations` and `soft_cost`. There are 25 hospital-schema tables after V004.
 
 If an earlier development database already records the removed
 `V002__schedules_and_reservations.sql`, this V002 will be rejected because its
@@ -74,12 +79,14 @@ foreign keys, negative request duration, overlapping candidates, confirmation
 references and invalid metadata/bounds. Docker access is required for the second
 command.
 
-Verification on 2026-11-22: the core/persistence Maven build passed with all 18
-core tests, and the six Testcontainers tests compiled. Direct checks on an
-isolated PostgreSQL 18.7 server passed for fresh installation, V001 upgrade with
-data/journal preservation, replay, overlapping candidates, exact confirmation
-references, unique reservations and invalid metadata/bounds. Docker could not
-start in this environment, so this is not a Testcontainers execution result.
+Verification on 2026-11-22: 18 core tests, four temporary mapper unit tests and 28 native
+PostgreSQL integration checks passed, including the shared-core round trip,
+legacy-score upgrade, migration replay, rollback, overlap and concurrency checks.
+Temporary check files, fixtures and generated outputs were removed after use.
+The user then ran the full Docker/Testcontainers profile successfully on
+2026-11-22. Its generated XML reports confirmed 18 core tests and 28 integration
+tests, with zero failures, errors or skips and no native JDBC override. Reports
+and generated build outputs were removed after recording this summary.
 
 ## Optional native PostgreSQL
 
@@ -162,21 +169,64 @@ from 168 hours. `HospitalRepositoryException` wraps SQL failures with their caus
 invalid references/IDs or out-of-week input produce `IllegalArgumentException`.
 Every failed save rolls back all its edits, and JDBC resources are closed.
 
-The seven `HospitalRepositoryJdbcIT` tests run with Testcontainers by default.
-For an explicitly disposable native PostgreSQL instance, the same tests can run
-without Docker (the supplied role needs permission to create test databases):
+### Delete editable entities
+
+`HospitalRepository` also supports explicit full-record deletion:
+
+```java
+boolean deleted = repository.deleteDoctor("hospital-code", "doctor-code");
+```
+
+`deleteDepartment`, `deleteSpecialty`, `deleteDoctor`, `deleteRoom` and
+`deleteRequest` take hospital code followed by entity code. A code outside the
+specified hospital returns false. `deleteHospital` takes the hospital code.
+`deletePatient`, `deleteRoomType` and `deleteEquipment` take only their entity
+code because those records are shared globally in the current schema.
+
+Each method returns true on deletion and false if no matching record exists.
+Blank codes are rejected. Deletion is explicit; omitting a record from `saveWeek`
+still does not delete it.
+
+Doctor deletion removes that doctor's specialty links, availability, absences
+and breaks. Room deletion removes its equipment links. Request deletion removes
+its availability/equipment links while retaining the patient's windows and shared
+equipment. An unused patient's deletion removes their preferences and windows.
+These owned details and the parent record are deleted in one transaction.
+
+External references are protected by the existing foreign keys. Saved candidate
+or confirmed assignments prevent deleting their doctor, room or request. Requests
+from any hospital prevent deleting their shared patient. Departments, specialties,
+hospitals and catalogs can only be deleted once their dependents are gone.
+`HospitalEntityInUseException` supplies an explanatory message and retains the
+SQL cause. A blocked deletion rolls back every owned-detail removal; it does not
+erase appointments or other master records to force the delete through.
+
+Scoped deletions lock the hospital before the target row, matching `saveWeek`'s
+lock order. All targets are locked before owned details are removed, allowing
+foreign keys to protect concurrent reference creation. User values are bound
+parameters; table names and cleanup queries are private constants.
+
+Temporary PostgreSQL checks verified all nine deletion operations, reference
+protection, rollback, shared patients/catalogs, hospital scoping and concurrent
+deletion. They passed alongside the 22 maintained native integration tests and
+18 core tests. Temporary check sources, databases and generated outputs were
+removed after validation.
+
+The repository integration tests use Testcontainers by default. For an explicitly
+disposable native PostgreSQL instance, the three repository/exclusion suites
+can run without Docker; the supplied role needs permission to create databases:
 
 ```bash
 bash mvnw -pl scheduler-persistence -am -Ppersistence-it \
-  -Dit.test=HospitalRepositoryJdbcIT -Dfailsafe.failIfNoSpecifiedTests=false \
+  -Dit.test=HospitalRepositoryJdbcIT,ScheduleRepositoryJdbcIT,ConfirmationConstraintsIT \
+  -Dfailsafe.failIfNoSpecifiedTests=false \
   -Dscheduler.test.jdbc.url=jdbc:postgresql://127.0.0.1:5432/postgres \
   -Dscheduler.test.jdbc.user=postgres verify
 ```
 
-The tests create and drop uniquely named databases. Verification on 2026-11-22
-used an isolated PostgreSQL 18.7 instance: all seven repository integration tests
-and 18 core tests passed. Docker execution remains pending in this environment.
-
+Each test creates and drops its own uniquely named database. Do not point this
+command at a production server. The native option does not run `MigrationIT`,
+which exercises the actual Bash runner inside a Docker container.
 
 ## Confirmed overlap constraints
 
@@ -189,69 +239,106 @@ for the two constraint names and their behavior.
 versions, adjacent bookings, independent resources, updates, valid V002 upgrades,
 invalid existing data with atomic rollback, and simultaneous confirmations after
 both commit and rollback. It shares the disposable database lifecycle with the
-repository tests and supports the same native JDBC properties. To include both
-suites in the native command above, use
-`-Dit.test=HospitalRepositoryJdbcIT,ConfirmationConstraintsIT`.
+repository tests and supports the same native JDBC properties.
 
-Verification on 2026-11-22: all 14 repository/exclusion integration tests and 18
-core tests passed on isolated PostgreSQL 18.7. Fresh V001–V003 installation and
-migration replay also passed, preserving the journal. These checks used native
-PostgreSQL; the Docker-backed migration test execution remains pending.
 
+## Shared-core integration
+
+Application and optimizer code can use Aymane's existing classes directly:
+
+```java
+HospitalRepository hospitals = new HospitalRepositoryJdbc(dataSource);
+ScheduleRepository schedules = new ScheduleRepositoryJdbc(dataSource);
+LocalDate monday = LocalDate.of(2026, 11, 23);
+OptimizationProblem problem = hospitals.loadProblem("hospital-code", monday).orElseThrow();
+OptimizationParameters parameters = new OptimizationParameters(42L, 100);
+OptimizationResult result = optimizer.optimize(
+    new OptimizationRequest(problem, parameters), progress -> {});
+
+ScheduleSnapshot.RunMetadata metadata = new ScheduleSnapshot.RunMetadata(
+    "candidate-001", "hospital-code", monday,
+    new ScheduleSnapshot.Algorithm("greedy.v1", optimizer.getName(), "1"),
+    "{\"maxIterations\":100}", parameters.seed());
+ScheduleSnapshot.StoredResult saved = schedules.saveResult(metadata, result, Set.of());
+OptimizationResult restored = schedules.loadResult("candidate-001", problem).orElseThrow().result();
+Schedule restoredSchedule = schedules.loadSchedule("candidate-001", problem).orElseThrow();
+```
+
+The example assumes a configured `DataSource` and an `Optimizer` supplied by the
+application. No JDBC or JavaFX dependency enters the shared domain. Editing can
+continue through `loadWeek`/`saveWeek`, preserving additional database fields.
+
+`CoreModelMapper` maps specialty/equipment codes consistently to core strings,
+combines doctor absences and breaks into unavailable periods, clips optimization
+windows to the selected week, and includes only OPEN requests. Each request must
+have usable availability. Patients are reused across requests by ID.
+
+The default integration convention is ROUTINE=1, PRIORITY=2, URGENT=3. To use a
+different agreed convention, inject a mapper with a complete distinct integer map.
+The same constructor accepts doctor-code -> selected-specialty-code entries:
+
+```java
+CoreModelMapper mapper = new CoreModelMapper(
+    Map.of(HospitalWeek.Urgency.ROUTINE, 1,
+           HospitalWeek.Urgency.PRIORITY, 2,
+           HospitalWeek.Urgency.URGENT, 3),
+    Map.of("doctor-code", "cardiology"));
+HospitalRepository hospitals = new HospitalRepositoryJdbc(dataSource, mapper);
+```
+
+A doctor with multiple specialties requires an explicit choice from that doctor's
+stored qualifications. The current core cannot express patient preferences,
+required equipment quantities above one, or per-request room types when other
+room types are present. Such optimization input is rejected with an explanatory
+`IllegalArgumentException`; its editing data remains stored. Available equipment
+quantities map to presence in the room's set. These checks prevent silently
+optimizing a problem with missing requirements.
+
+SQL instants convert to `TimeSlot` local date-times using the hospital zone. Missing
+or repeated local clock times are rejected because `TimeSlot` has no offset field.
+Schedule versions capture that zone on save, so later hospital-zone edits do not
+reinterpret saved appointments. Sub-microsecond values remain unsupported.
 
 ## Schedule repository
 
-Inject the same configured `DataSource` into `ScheduleRepositoryJdbc`. Its core
-contract is `ScheduleRepository`; its immutable data is `ScheduleSnapshot`.
+`saveResult` saves the shared `Schedule`, both `FitnessBreakdown` components,
+every history entry in order and the exact `OptimizationResult.status` in one
+transaction. Optimizer status is independent of lifecycle CANDIDATE/CONFIRMED.
+Lock IDs accompany the result because the current core `Schedule` has no lock
+field. A lock must reference an included request. `loadResult` reconstructs the
+shared appointments using the actual objects from the supplied matching
+`OptimizationProblem`; missing IDs cause an error. It does not recreate a
+historical problem snapshot after hospital data has changed.
 
-```java
-ScheduleRepository schedules = new ScheduleRepositoryJdbc(dataSource);
-ScheduleSnapshot candidate = new ScheduleSnapshot(
-    "candidate-001", "hospital-code", LocalDate.of(2026, 11, 23),
-    new ScheduleSnapshot.Algorithm("greedy.v1", "Greedy", "1"),
-    "{\"iterations\":100}", 42L, new BigDecimal("12.5"),
-    List.of(new ScheduleSnapshot.Assignment(
-        requestId, doctorId, roomId,
-        Instant.parse("2026-11-23T08:00:00Z"),
-        Instant.parse("2026-11-23T08:30:00Z"), false)));
-ScheduleSnapshot.Stored saved = schedules.saveCandidate(candidate);
-Optional<ScheduleSnapshot.Stored> reloaded = schedules.load("candidate-001");
-List<ScheduleSnapshot.Stored> versions = schedules.loadWeek(
-    "hospital-code", LocalDate.of(2026, 11, 23));
-```
+The lower-level `saveCandidate(ScheduleSnapshot)` remains available for storing
+candidate data without an optimizer run. Its `finalFitness` now uses the shared
+`FitnessBreakdown`, with optional history/status. Legacy scalar-only versions
+remain readable through `load()` and their `legacyFitness()` value. `loadResult`
+refuses to invent missing score components or optimizer status; `loadSchedule`
+can still reconstruct their appointments given a matching problem.
 
-The hospital and referenced requests/resources must already exist. Use a new
-unique schedule code for each version; a duplicate code fails without changing
-the existing schedule. The week row is shared across versions of the same
-hospital/Monday. Algorithm codes must retain the same name/version; use a new
-code when the algorithm changes. Parameters must be valid JSON objects.
-The returned snapshot contains PostgreSQL's canonical JSON formatting.
+The hospital and referenced requests/resources must already exist. Each saved
+version needs a unique code; a duplicate fails without overwriting the existing
+version. Hospital weeks are shared across versions. Algorithm codes retain their
+name/version; use a new code for a new implementation version. Parameters must
+be valid JSON objects; returned JSON uses PostgreSQL's canonical formatting.
+Seeds retain all 64 bits. Hard violations use an integer and soft cost uses a
+finite nonnegative double, matching `FitnessBreakdown` and its lexicographic
+comparison without scalar encoding.
 
-Candidate fitness is a nonnegative `BigDecimal`; seeds use Java `long` and SQL
-`bigint`. Assignments require positive known IDs, distinct request IDs, positive
-time intervals and microsecond precision. Their order on reload is request-ID
-order. Empty or incomplete candidates and conflicting assignments can be stored;
-completeness and business feasibility remain service/optimizer responsibilities.
-`locked` is preserved as data; enforcing locks during optimization belongs to core.
+Assignments are batch-inserted, one per request per version, with valid IDs from
+the same hospital. Resource conflicts and incomplete candidates remain
+representable for fitness evaluation. The service still owns completeness,
+feasibility and lock-preservation rules. A failed statement or invalid reference
+rolls back metadata, assignments and history. SQL failures are wrapped in
+`ScheduleRepositoryException`; validation failures use `IllegalArgumentException`.
 
-The save owns one connection and transaction for its week, algorithm, schedule
-and assignment batch. Unknown or foreign references produce
-`IllegalArgumentException`; SQL failures produce `ScheduleRepositoryException`
-with the underlying cause. Both roll the operation back. Existing versions and
-confirmed reservations are never replaced by this operation. Listing an unknown
-hospital/week returns an empty list; loading an unknown code returns empty.
-Read operations also support existing draft/running rows with no fitness value,
-although `saveCandidate` requires a score and always creates CANDIDATE status.
+Loads use three grouped queries for assignments, history and metadata, with
+repeatable-read consistency. Versions are ordered by creation timestamp/ID;
+assignments by request ID. Unknown codes return empty; unknown hospital/weeks
+return empty lists. The candidate API does not publish operational reservations.
 
-`ScheduleRepositoryJdbcIT` adds eight integration tests for a 150-assignment
-batch, metadata/time/lock round trips, conflicting candidates, separate versions,
-week/hospital filters, invalid JSON, late batch failure, immutable codes,
-algorithm metadata protection and cross-hospital rejection. It uses the shared
-Testcontainers/native lifecycle. To run all three native repository/exclusion
-suites with the command above, set
-`-Dit.test=ScheduleRepositoryJdbcIT,HospitalRepositoryJdbcIT,ConfirmationConstraintsIT`.
-
-Verification on 2026-11-22: all 22 repository/exclusion integration tests and 18
-core tests passed on isolated PostgreSQL 18.7, including the 150-assignment save
-and full rollback of a partially successful assignment batch. Migration replay
-also passed. Docker-backed migration test execution remains pending.
+Temporary validation checked the shared optimizer/result round trip, legacy-score
+upgrade, history, object identity and saved time zones. Those temporary checks and
+their generated outputs were removed after use. The committed repository,
+migration and exclusion tests remain the project's maintained test suite.

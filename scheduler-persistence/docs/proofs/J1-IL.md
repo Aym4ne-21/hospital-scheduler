@@ -13,24 +13,29 @@ Day 1 owner: Ilyass. Reviewer: Amine. Team-PC results remain pending; use the
 - `MigrationIT` checks an empty database, migration replay, negative request
   duration and an invalid patient foreign key.
 - The [schema guide](../database-schema.md) documents relationships and current
-  Java mapping gaps.
+  Java mapping rules and remaining core-model limitations.
 
 ## Verification recorded
 
-A clean Maven build was run successfully: all six modules compiled and all 18
-core unit tests passed. The Day 1 Testcontainers suite compiles. A previous
-Testcontainers attempt could not initialize Docker in the local agent environment,
-so no Docker test pass is claimed here.
+A previous full reactor build compiled all six modules. Native PostgreSQL checks
+also passed; Docker was initially unavailable to the agent.
 
-The initial schema's SQL constraints were checked on an isolated PostgreSQL
-server. Historical work on schedules, experiment fixtures and replanning was
-removed from this Day 1 branch; those checks do not describe the current files.
+On 2026-11-22, Ilyass ran the full `persistence-it` profile from his terminal.
+The generated XML reports were inspected: all 18 core tests and 28 integration
+tests passed, with zero failures, errors or skips. No native JDBC override was
+present, so all four integration suites used Docker/Testcontainers. Maven's Java
+runtime was 17.0.19. Generated reports and build outputs were removed after this
+summary was recorded, per the requested cleanup policy.
+
+The current working tree includes the Day 2 extensions through V004; this run
+covers those extensions as well as the V001 foundation. It does not establish
+that the other three team PCs have passed or that the work has been reviewed.
 
 | Team member | OS and tools | Commit SHA | Host DB connection | Testcontainers result | Date |
 |---|---|---|---|---|---|
 | Aymane | Pending | Pending | Pending | Pending | Pending |
 | Amine | Pending | Pending | Pending | Pending | Pending |
-| Ilyass | Pending | Pending | Pending | Docker access pending | Pending |
+| Ilyass | Ubuntu 25.10; Java 17.0.19; Docker Snap 29.8.0 | Working tree with uncommitted changes | Pending | 28 IT passed; no skips | 2026-11-22 |
 | Youness | Pending | Pending | Pending | Pending | Pending |
 
 Amine's schema review and the team's Java/time-zone decision remain pending.

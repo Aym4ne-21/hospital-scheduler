@@ -1,7 +1,9 @@
 package com.hospitalscheduler.persistence;
 
 import com.hospitalscheduler.repository.HospitalRepository;
+import com.hospitalscheduler.optimization.OptimizationProblem;
 import com.hospitalscheduler.repository.HospitalRepositoryException;
+import com.hospitalscheduler.repository.HospitalEntityInUseException;
 import com.hospitalscheduler.repository.HospitalWeek;
 import com.hospitalscheduler.repository.HospitalWeek.*;
 
@@ -13,6 +15,7 @@ import java.util.*;
 /** JDBC adapter. Each call owns one connection and one transaction. */
 public final class HospitalRepositoryJdbc implements HospitalRepository {
     private final DataSource dataSource;
+    private final CoreModelMapper mapper;
 
     // Windowless requests remain visible so validation can explain missing availability.
     private static final String WEEK_REQUESTS = """
@@ -30,7 +33,17 @@ public final class HospitalRepositoryJdbc implements HospitalRepository {
             """;
 
     public HospitalRepositoryJdbc(DataSource dataSource) {
+        this(dataSource, new CoreModelMapper());
+    }
+
+    public HospitalRepositoryJdbc(DataSource dataSource, CoreModelMapper mapper) {
         this.dataSource = Objects.requireNonNull(dataSource);
+        this.mapper = Objects.requireNonNull(mapper);
+    }
+
+    @Override
+    public Optional<OptimizationProblem> loadProblem(String hospitalCode, LocalDate startsOn) {
+        return loadWeek(hospitalCode, startsOn).map(mapper::toProblem);
     }
 
     @Override
@@ -299,6 +312,128 @@ public final class HospitalRepositoryJdbc implements HospitalRepository {
             }
             return null;
         });
+    }
+
+    @Override
+    public boolean deleteHospital(String code) {
+        return deleteRecord(EditableEntity.HOSPITAL, null, code);
+    }
+
+    @Override
+    public boolean deleteDepartment(String hospitalCode, String code) {
+        return deleteRecord(EditableEntity.DEPARTMENT, hospitalCode, code);
+    }
+
+    @Override
+    public boolean deleteSpecialty(String hospitalCode, String code) {
+        return deleteRecord(EditableEntity.SPECIALTY, hospitalCode, code);
+    }
+
+    @Override
+    public boolean deleteDoctor(String hospitalCode, String code) {
+        return deleteRecord(EditableEntity.DOCTOR, hospitalCode, code);
+    }
+
+    @Override
+    public boolean deleteRoom(String hospitalCode, String code) {
+        return deleteRecord(EditableEntity.ROOM, hospitalCode, code);
+    }
+
+    @Override
+    public boolean deleteRequest(String hospitalCode, String code) {
+        return deleteRecord(EditableEntity.REQUEST, hospitalCode, code);
+    }
+
+    @Override
+    public boolean deletePatient(String code) {
+        return deleteRecord(EditableEntity.PATIENT, null, code);
+    }
+
+    @Override
+    public boolean deleteRoomType(String code) {
+        return deleteRecord(EditableEntity.ROOM_TYPE, null, code);
+    }
+
+    @Override
+    public boolean deleteEquipment(String code) {
+        return deleteRecord(EditableEntity.EQUIPMENT, null, code);
+    }
+
+    private boolean deleteRecord(EditableEntity entity, String hospitalCode, String code) {
+        requireCode(code);
+        if (entity.hospitalColumn != null) requireCode(hospitalCode);
+        try {
+            return transaction(false, c -> {
+                Long hospitalId = null;
+                if (entity.hospitalColumn != null) {
+                    // Same lock order as saveWeek: hospital first, then its editable entity.
+                    List<Long> hospitals = query(c, "SELECT id FROM hospital.hospital WHERE code=? FOR UPDATE",
+                            r -> r.getLong("id"), hospitalCode);
+                    if (hospitals.isEmpty()) return false;
+                    hospitalId = hospitals.get(0);
+                }
+                // SQL identifiers and joins come exclusively from the private enum below.
+                String sql = "SELECT e.id FROM hospital." + entity.table + " e " + entity.join
+                        + " WHERE e.code=?" + (hospitalId == null ? "" : " AND " + entity.hospitalColumn + "=?")
+                        + " FOR UPDATE OF e";
+                Object[] args = hospitalId == null ? new Object[]{code} : new Object[]{code, hospitalId};
+                List<Long> matches = query(c, sql, r -> r.getLong("id"), args);
+                if (matches.isEmpty()) return false;
+                long id = matches.get(0);
+                // Only owned details are removed. All external references remain protected by FKs.
+                for (String childDelete : entity.childDeletes) execute(c, childDelete, id);
+                try (var statement = prepare(c, "DELETE FROM hospital." + entity.table + " WHERE id=?", id)) {
+                    return statement.executeUpdate() == 1;
+                }
+            });
+        } catch (HospitalRepositoryException error) {
+            // transaction() has already rolled back every child deletion at this point.
+            if (error.getCause() instanceof SQLException sql && "23503".equals(sql.getSQLState())) {
+                throw new HospitalEntityInUseException(entity.label, code, sql);
+            }
+            throw error;
+        }
+    }
+
+    private static void requireCode(String code) {
+        if (code == null || code.isBlank()) throw new IllegalArgumentException("Entity codes must not be blank");
+    }
+
+    private enum EditableEntity {
+        HOSPITAL("hospital", "hospital", "", null),
+        DEPARTMENT("department", "department", "", "e.hospital_id"),
+        SPECIALTY("specialty", "specialty", "JOIN hospital.department d ON d.id=e.department_id", "d.hospital_id"),
+        DOCTOR("doctor", "doctor", "JOIN hospital.department d ON d.id=e.department_id", "d.hospital_id",
+                "DELETE FROM hospital.doctor_specialty WHERE doctor_id=?",
+                "DELETE FROM hospital.doctor_availability WHERE doctor_id=?",
+                "DELETE FROM hospital.doctor_absence WHERE doctor_id=?",
+                "DELETE FROM hospital.doctor_break WHERE doctor_id=?"),
+        ROOM("room", "room", "JOIN hospital.department d ON d.id=e.department_id", "d.hospital_id",
+                "DELETE FROM hospital.room_equipment WHERE room_id=?"),
+        REQUEST("appointment_request", "appointment request",
+                "JOIN hospital.specialty s ON s.id=e.specialty_id JOIN hospital.department d ON d.id=s.department_id",
+                "d.hospital_id",
+                "DELETE FROM hospital.request_availability WHERE request_id=?",
+                "DELETE FROM hospital.request_equipment WHERE request_id=?"),
+        PATIENT("patient", "patient", "", null,
+                "DELETE FROM hospital.patient_time_preference WHERE patient_id=?",
+                "DELETE FROM hospital.patient_availability WHERE patient_id=?"),
+        ROOM_TYPE("room_type", "room type", "", null),
+        EQUIPMENT("equipment", "equipment", "", null);
+
+        final String table;
+        final String label;
+        final String join;
+        final String hospitalColumn;
+        final List<String> childDeletes;
+
+        EditableEntity(String table, String label, String join, String hospitalColumn, String... childDeletes) {
+            this.table = table;
+            this.label = label;
+            this.join = join;
+            this.hospitalColumn = hospitalColumn;
+            this.childDeletes = List.of(childDeletes);
+        }
     }
 
     private <T> T transaction(boolean readOnly, SqlWork<T> work) {

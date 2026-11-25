@@ -39,10 +39,10 @@ contract to confirm.
 | Core type | Initial database representation | Open mapping detail |
 |---|---|---|
 | `Patient` | `patient` | Java `long` maps to SQL `bigint`. |
-| `Doctor` | `doctor`, `doctor_specialty`, dated availability/absence/break rows | Core has one specialty string; SQL supports multiple specialties. |
+| `Doctor` | `doctor`, `doctor_specialty`, dated availability/absence/break rows | Single qualification or an explicit selection maps to the core specialty string. |
 | `Room` | `room`, `room_equipment`, `equipment` | Type and quantity are preserved in the repository DTOs. |
-| `TimeSlot` | `timestamptz` endpoints, `[start,end)` range | Convert instants through the hospital zone to Java `LocalDateTime`. |
-| `AppointmentRequest` | `appointment_request`, patient windows and equipment links | Java urgency is an unstandardized integer; SQL uses named levels. |
+| `TimeSlot` | `timestamptz` endpoints, `[start,end)` range | Mapper converts through the hospital zone and rejects ambiguous/missing clock times. |
+| `AppointmentRequest` | `appointment_request`, patient windows and equipment links | Configurable mapping; defaults ROUTINE=1, PRIORITY=2, URGENT=3. |
 
 ## Day 2 task 1: schedules
 
@@ -94,9 +94,10 @@ retain their original endpoints, including windows crossing a week boundary.
 All SELECTs share a repeatable-read transaction and deterministic ordering;
 related collections are loaded in groups instead of one SELECT per doctor.
 
-The current optimizer model still needs a separately agreed mapping for urgency,
-multiple specialties, quantities and local date-times. The editing DTO avoids
-silently dropping those fields while that contract is finalized.
+`loadProblem` converts editing data into the existing shared core via
+`CoreModelMapper`. Absences/breaks combine into unavailable slots; OPEN requests
+are selected for optimization. See the [mapping rules](database-setup.md#shared-core-integration)
+for specialty selection, urgency configuration and representability checks.
 
 
 ## Day 2 task 3: confirmed resource exclusions
@@ -127,7 +128,7 @@ version handling still belong in the future confirmation service/repository.
 ## Day 2 task 3: schedule repository
 
 `ScheduleRepository` and `ScheduleSnapshot` live in core. The JDBC implementation
-in persistence uses the existing V002 tables without changing any migration.
+in persistence uses V002 plus the V004 core-fitness extension.
 `saveCandidate` creates a new saved version, reuses or creates its hospital week
 and algorithm, then inserts all assignments with a prepared JDBC batch. Any
 failed statement or invalid reference rolls the entire operation back.
@@ -139,8 +140,20 @@ fitness violations remain representable. This method never writes operational
 reservations or sets a schedule to CONFIRMED.
 
 Loads use repeatable-read transactions. Week loads fetch assignments and metadata
-in two grouped queries; versions are ordered by creation timestamp/ID and their
+and history in three grouped queries; versions are ordered by creation timestamp/ID and their
 assignments by request ID. Algorithm metadata, canonical JSON parameters, seed,
-exact fitness, timestamps and lock flags survive reload. Assignment database IDs
+both fitness components, timestamps and lock flags survive reload. Assignment database IDs
 remain internal; the public contract identifies an assignment by its request
 within the saved version.
+
+
+## Core contract extension: V004
+
+`V004__core_fitness_contract.sql` adds `hard_violations` (integer), `soft_cost`
+(finite nonnegative double), `optimizer_status` and saved `time_zone` to schedule.
+The new `schedule_fitness_history` table stores ordered score pairs by schedule
+and zero-based list position. This raises the hospital-schema table count to 25.
+New repository writes preserve `FitnessBreakdown` directly without encoding a
+single scalar. Existing `final_fitness` values remain as legacy data, with unknown
+components left null. Existing schedule zones are initialized from the current
+hospital zone during the upgrade; new versions capture their zone on save.

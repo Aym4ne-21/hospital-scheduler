@@ -6,7 +6,7 @@ import com.hospitalscheduler.repository.ScheduleSnapshot.*;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
-import java.math.BigDecimal;
+import com.hospitalscheduler.optimization.FitnessBreakdown;
 import java.sql.SQLException;
 import java.time.*;
 import java.util.ArrayList;
@@ -56,7 +56,7 @@ class ScheduleRepositoryJdbcIT extends PostgresIntegrationTest {
         assertNotNull(saved.createdAt());
         assertEquals(ALGORITHM, saved.snapshot().algorithm());
         assertEquals(Long.MIN_VALUE, saved.snapshot().randomSeed());
-        assertEquals(0, saved.snapshot().finalFitness().compareTo(input.finalFitness()));
+        assertEquals(input.finalFitness(), saved.snapshot().finalFitness());
         assertTrue(saved.snapshot().parametersJson().contains("O'Neil — تجربة"));
         assertEquals(150, saved.snapshot().assignments().size());
         assertEquals(assignment(1, 1, 1, false), saved.snapshot().assignments().get(0));
@@ -143,7 +143,7 @@ class ScheduleRepositoryJdbcIT extends PostgresIntegrationTest {
     void readsDraftsWithoutFitnessAndRejectsIncompleteCandidateInput() throws Exception {
         Stored original = repository.saveCandidate(candidate("draft", List.of()));
         try (var c = dataSource.getConnection(); var s = c.createStatement()) {
-            s.executeUpdate("UPDATE hospital.schedule SET status='DRAFT', final_fitness=NULL WHERE code='draft'");
+            s.executeUpdate("UPDATE hospital.schedule SET status='DRAFT', final_fitness=NULL, hard_violations=NULL, soft_cost=NULL WHERE code='draft'");
         }
         Stored draft = repository.load("draft").orElseThrow();
         assertEquals(original.id(), draft.id());
@@ -162,7 +162,7 @@ class ScheduleRepositoryJdbcIT extends PostgresIntegrationTest {
     private static ScheduleSnapshot candidate(String code, String hospital, LocalDate monday,
                                               Algorithm algorithm, String json, List<Assignment> assignments) {
         return new ScheduleSnapshot(code, hospital, monday, algorithm, json, Long.MIN_VALUE,
-                new BigDecimal("123456789.123456789"), assignments);
+                new FitnessBreakdown(7, 123456789.123456789), assignments);
     }
 
     private static Assignment assignment(long request, long doctor, long room, boolean locked) {

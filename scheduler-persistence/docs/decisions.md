@@ -21,17 +21,28 @@
   explicit `ZoneId` for local week boundaries. Sub-microsecond input is rejected
   rather than rounded by PostgreSQL.
 
-The optimizer domain's single doctor specialty, integer urgency and local date-time
-slots do not fully match the SQL model. The repository's immutable `HospitalWeek`
-DTO preserves those details without changing existing optimizer contracts.
-Conversion to optimizer objects still requires team agreement; see the
-[core contract](../../docs/contracts.md).
-
 - `ScheduleRepositoryJdbc` inserts immutable candidate versions with unique caller
   codes. Duplicate codes fail instead of overwriting historical or confirmed data.
   Assignments are inserted as one JDBC batch in the same transaction as metadata.
 - Algorithm codes identify fixed names/versions; a new implementation version must
   use a new code. This prevents later saves changing historical algorithm metadata.
-- Repository snapshots preserve JSON parameters, exact numeric fitness, signed
+- Repository snapshots preserve JSON parameters, shared fitness components, signed
   64-bit seeds, lock flags and absolute instants. PostgreSQL validates and
   canonicalizes parameter JSON without an additional JSON-library dependency.
+
+- The application-facing repository path uses `OptimizationProblem`, `Schedule`
+  and `OptimizationResult`. Editing DTOs retain the richer database metadata.
+- `CoreModelMapper` defines a configurable default urgency mapping (1/2/3 for
+  routine/priority/urgent), explicit specialty selection for multi-qualified
+  doctors, and strict representability checks. Core domain classes are not extended.
+- V004 adds two fitness components, ordered history, optimizer status and saved
+  time zone. Legacy scalar values are retained without guessing their components.
+- Repeated/missing local clock times are rejected because the shared TimeSlot
+  cannot retain an offset. Stored schedules capture the conversion zone at save.
+- Full-record deletion is explicit and transactional. Owned child rows are
+  removed with their parent; external references retain foreign-key protection.
+  Saved appointments and requests in any hospital are never removed to enable
+  deletion. A blocked operation raises `HospitalEntityInUseException` after rollback.
+- Scoped deletion uses hospital code plus entity code and the same hospital-first
+  lock order as `saveWeek`. Shared patients, equipment and room types have explicit
+  global deletion methods. Missing or out-of-scope records return false.

@@ -44,3 +44,7 @@ atomically, then loads them by code or hospital/week. See
 [schedule repository usage](docs/database-setup.md#schedule-repository).
 The application confirmation transaction remains subsequent work.
 Experiment tables and demo seeds remain later work.
+
+V004 integrates the shared core score/history/status and preserves legacy scalar
+scores. `loadProblem`, `saveResult`, `loadResult` and `loadSchedule` provide the
+application-facing core integration; see [the complete example and mapping rules](docs/database-setup.md#shared-core-integration).

@@ -73,11 +73,15 @@ abstract class PostgresIntegrationTest {
 
     protected List<String> migrations() {
         return List.of("V001__hospital_and_availability.sql", "V002__schedules.sql",
-                "V003__confirmed_appointment_exclusions.sql");
+                "V003__confirmed_appointment_exclusions.sql", "V004__core_fitness_contract.sql");
     }
 
     protected void executeMigration(Connection connection, String filename) throws Exception {
-        try (var stream = getClass().getResourceAsStream("/db/migration/" + filename);
+        executeSqlResource(connection, "/db/migration/" + filename);
+    }
+
+    protected void executeSqlResource(Connection connection, String resource) throws Exception {
+        try (var stream = getClass().getResourceAsStream(resource);
              var statement = connection.createStatement()) {
             assertNotNull(stream);
             statement.execute(new String(stream.readAllBytes(), StandardCharsets.UTF_8));

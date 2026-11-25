@@ -237,17 +237,32 @@ A successful build verifies the compiled core and its current tests. It does not
 PostgreSQL migrations, database setup and the four-PC verification checklist are
 documented in the [persistence module](../scheduler-persistence/README.md).
 
-The core `com.hospitalscheduler.repository` package defines `HospitalRepository`
-and immutable `HospitalWeek` editing data. The persistence module supplies its
-JDBC implementation. The editing data preserves multiple specialties, equipment
-quantities and absolute timestamps; conversion into optimizer types still needs
-the team's mapping conventions. Usage and weekly save semantics are documented
-in the [repository guide](../scheduler-persistence/docs/database-setup.md#hospital-repository).
+## 9. Persistence integration
 
+The `com.hospitalscheduler.repository` contracts expose the shared optimizer
+objects. `HospitalRepository.loadProblem(hospitalCode, monday)` returns an
+`OptimizationProblem`. `ScheduleRepository.saveResult(metadata, result, locks)`
+accepts an `OptimizationResult`; `loadResult(code, problem)` restores it, and
+`loadSchedule(code, problem)` returns the shared `Schedule`. The supplied problem
+provides the existing request/doctor/room objects used to hydrate appointments.
 
-`ScheduleRepository` persists immutable `ScheduleSnapshot` candidate versions.
-Its JDBC implementation inserts metadata and assignments atomically and loads
-versions by code or hospital/week. Snapshot assignments use existing request,
-doctor and room IDs, absolute instants and lock flags; they remain separate from
-optimizer `Schedule` objects until the application's mapping conventions are agreed.
-See [schedule repository usage](../scheduler-persistence/docs/database-setup.md#schedule-repository).
+The persistence adapter converts database instants through the hospital zone,
+combines doctor absences/breaks, maps specialty/equipment codes to strings, and
+maps urgency with a documented configurable integer convention. Unsupported
+requirements are rejected explicitly. The existing domain constructors and
+optimizer interfaces remain the integration authority.
+
+`HospitalWeek` is the richer editing data contract. `ScheduleSnapshot` represents
+storage metadata and assignment IDs; its score/history use `FitnessBreakdown`.
+Optimizer code continues to consume `OptimizationProblem`, `Schedule` and
+`OptimizationResult`. V004 preserves both score components, every history entry
+and optimizer status. Legacy scalar scores remain available without automatic
+conversion into unknown hard/soft values.
+
+See [repository usage and mapping rules](../scheduler-persistence/docs/database-setup.md#shared-core-integration).
+
+`HospitalRepository` exposes explicit deletion methods for editable hospital
+entities. Scoped resources require hospital code plus entity code; shared patients
+and catalogs use global codes. Missing records return false; external references
+raise `HospitalEntityInUseException`. Each deletion includes its owned details in
+one transaction while preserving saved schedule history.

@@ -58,8 +58,8 @@ docker compose ps
 docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 -c "SELECT version, filename FROM public.database_schema_migration ORDER BY version;"
 ```
 
-Expected: the service is healthy and migration versions 1, 2 and 3 are recorded.
-Repeating the migration command should report all three as already applied.
+Expected: the service is healthy and migration versions 1, 2, 3 and 4 are recorded.
+Repeating the migration command should report all four as already applied.
 See [migration compatibility](database-setup.md#migrations) if this PC applied
 the earlier development V002.
 

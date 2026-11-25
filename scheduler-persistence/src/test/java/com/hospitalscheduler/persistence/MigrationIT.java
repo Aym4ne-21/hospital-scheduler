@@ -53,9 +53,9 @@ class MigrationIT {
     void migratesEmptyDatabaseAndReplaysWithoutChangingTheJournal() throws Exception {
         migrate();
         try (var connection = connect()) {
-            assertEquals(24, scalar(connection, "SELECT count(*) FROM information_schema.tables "
+            assertEquals(25, scalar(connection, "SELECT count(*) FROM information_schema.tables "
                     + "WHERE table_schema='hospital' AND table_type='BASE TABLE'"));
-            assertEquals(3, scalar(connection, "SELECT count(*) FROM public.database_schema_migration"));
+            assertEquals(4, scalar(connection, "SELECT count(*) FROM public.database_schema_migration"));
             assertEquals(1, scalar(connection, "SELECT count(*) FROM pg_extension WHERE extname='btree_gist'"));
             assertEquals(0, scalar(connection, "SELECT count(*) FROM hospital.patient"));
             String before = journal(connection);
@@ -80,7 +80,7 @@ class MigrationIT {
             migrate();
             assertEquals(1, scalar(connection, "SELECT count(*) FROM hospital.hospital "
                     + "WHERE code='upgrade.hospital' AND name='Preserved hospital'"));
-            assertEquals(3, scalar(connection, "SELECT count(*) FROM public.database_schema_migration"));
+            assertEquals(4, scalar(connection, "SELECT count(*) FROM public.database_schema_migration"));
             assertTrue(journal(connection).startsWith(before + ","), "V001 journal must be preserved");
         }
     }
